@@ -1,0 +1,6 @@
+{
+  "name": "Kelas 6A MI Al-Hidayah Sawotratap",
+  "description": "Portal akademik, jadwal pelajaran, tugas sekolah, catatan uang kas, pengumuman real-time, dan komunikasi resmi Kelas 6A MI Al-Hidayah Sawotratap.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,318 @@
+{
+  "entities": {
+    "UserPublic": {
+      "title": "UserPublic",
+      "description": "Public class member profile without PII (email isolated in users_private).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "displayName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "nickname": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "absenNumber": { "type": "integer" },
+        "role": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "status": { "type": "string", "enum": ["aktif", "nonaktif"] },
+        "classId": { "type": "string", "enum": ["6A"] },
+        "lastLoginAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "nickname", "photoURL", "absenNumber", "role", "status", "classId", "lastLoginAt", "updatedAt"]
+    },
+    "UserPrivate": {
+      "title": "UserPrivate",
+      "description": "Private PII record containing email and login timestamps, accessible only to self and Owner.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt", "lastLoginAt"]
+    },
+    "TaskProgress": {
+      "title": "TaskProgress",
+      "description": "Per-student progress state for an assignment.",
+      "type": "object",
+      "properties": {
+        "taskId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "completed": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["belum", "sedang", "selesai"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["taskId", "uid", "completed", "status", "updatedAt"]
+    },
+    "NotificationState": {
+      "title": "NotificationState",
+      "description": "Per-user notification read cursor.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "readIds": { "type": "array" },
+        "lastReadAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "readIds", "lastReadAt"]
+    },
+    "LoginHistory": {
+      "title": "LoginHistory",
+      "description": "Audit log of sign-in events, readable strictly by Owner.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "role": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "deviceInfo": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "loggedInAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "email", "role", "deviceInfo", "loggedInAt"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Class-wide announcement published by Owner or Admin.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "title": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "content": { "type": "string", "minLength": 3, "maxLength": 2000 },
+        "category": { "type": "string", "enum": ["Penting", "Akademik", "Kegiatan", "Umum"] },
+        "priority": { "type": "string", "enum": ["normal", "penting", "mendesak"] },
+        "pinned": { "type": "boolean" },
+        "archived": { "type": "boolean" },
+        "authorId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "authorRole": { "type": "string", "enum": ["owner", "admin"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "title", "content", "category", "priority", "pinned", "archived", "authorId", "authorName", "authorRole", "createdAt", "updatedAt"]
+    },
+    "Assignment": {
+      "title": "Assignment",
+      "description": "School homework assignment for Kelas 6A.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "title": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "assignedDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "dueDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "priority": { "type": "string", "enum": ["rendah", "sedang", "tinggi"] },
+        "authorId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "authorRole": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "editHistory": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "subject", "title", "description", "assignedDate", "dueDate", "priority", "authorId", "authorName", "authorRole", "editHistory", "createdAt", "updatedAt"]
+    },
+    "ScheduleItem": {
+      "title": "ScheduleItem",
+      "description": "Weekly class lesson schedule entry.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "day": { "type": "string", "enum": ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"] },
+        "order": { "type": "integer" },
+        "startTime": { "type": "string", "maxLength": 5 },
+        "endTime": { "type": "string", "maxLength": 5 },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "teacher": { "type": "string", "maxLength": 80 },
+        "room": { "type": "string", "maxLength": 40 },
+        "authorId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "day", "order", "startTime", "endTime", "subject", "teacher", "room", "authorId", "updatedAt"]
+    },
+    "AgendaItem": {
+      "title": "AgendaItem",
+      "description": "Upcoming or completed class event or agenda item.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "title": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "eventDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "eventTime": { "type": "string", "maxLength": 5 },
+        "location": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "status": { "type": "string", "enum": ["mendatang", "selesai"] },
+        "authorId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "title", "description", "eventDate", "eventTime", "location", "status", "authorId", "authorName", "createdAt", "updatedAt"]
+    },
+    "TreasuryEntry": {
+      "title": "TreasuryEntry",
+      "description": "Class cash ledger entry (Uang Kas) with audit correction support.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "type": { "type": "string", "enum": ["pemasukan", "pengeluaran"] },
+        "amount": { "type": "number" },
+        "description": { "type": "string", "minLength": 3, "maxLength": 160 },
+        "category": { "type": "string", "enum": ["Iuran Kas", "Donasi", "Perlengkapan", "Kegiatan", "Lainnya"] },
+        "studentName": { "type": "string", "maxLength": 80 },
+        "paymentStatus": { "type": "string", "enum": ["lunas", "belum", "operasional"] },
+        "correctionNote": { "type": "string", "maxLength": 240 },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "recordedById": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "recordedByName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "type", "amount", "description", "category", "studentName", "paymentStatus", "correctionNote", "date", "recordedById", "recordedByName", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Real-time class group chat message.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "senderId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "senderName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "senderRole": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "senderId", "senderName", "senderRole", "text", "createdAt"]
+    },
+    "AdminMessage": {
+      "title": "AdminMessage",
+      "description": "Private message from a student to Admin/Owner.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "senderId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "senderName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "category": { "type": "string", "enum": ["Izin", "Laporan", "Saran", "Pertanyaan"] },
+        "subject": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "message": { "type": "string", "minLength": 3, "maxLength": 1500 },
+        "status": { "type": "string", "enum": ["menunggu", "dibaca", "selesai"] },
+        "adminReply": { "type": "string", "maxLength": 1500 },
+        "repliedBy": { "type": "string", "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "senderId", "senderName", "category", "subject", "message", "status", "adminReply", "repliedBy", "createdAt", "updatedAt"]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "Real-time notification event for announcements, tasks, schedules, agendas, and admin replies.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "type": { "type": "string", "enum": ["pengumuman", "tugas", "jadwal", "agenda", "pesan-admin", "info"] },
+        "title": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "targetTab": { "type": "string", "maxLength": 40 },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "actorId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "actorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "type", "title", "body", "targetTab", "targetUid", "actorId", "actorName", "createdAt"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "User activity & data change audit trail.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "actorId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "actorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "actorRole": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "action": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "targetCollection": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "detail": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "actorId", "actorName", "actorRole", "action", "targetCollection", "detail", "createdAt"]
+    },
+    "ClassSettings": {
+      "title": "ClassSettings",
+      "description": "Class and application configuration managed by Owner.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "homeroomTeacher": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "academicYear": { "type": "string", "minLength": 4, "maxLength": 30 },
+        "motto": { "type": "string", "maxLength": 160 },
+        "adminContactNote": { "type": "string", "maxLength": 160 },
+        "weeklyKasTarget": { "type": "number" },
+        "allowStudentCreateTask": { "type": "boolean" },
+        "allowStudentCreateAgenda": { "type": "boolean" },
+        "allowAdminManageTreasury": { "type": "boolean" },
+        "allowAdminManageSchedule": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "homeroomTeacher", "academicYear", "motto", "adminContactNote", "weeklyKasTarget", "allowStudentCreateTask", "allowStudentCreateAgenda", "allowAdminManageTreasury", "allowAdminManageSchedule", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users_public/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublic" },
+      "description": "Public profile for Kelas 6A members (role, nickname, status & absen)."
+    },
+    "/users_private/{userId}": {
+      "schema": { "$ref": "#/entities/UserPrivate" },
+      "description": "Private PII (email) accessible only by self or Owner."
+    },
+    "/users_private/{userId}/task_progress/{taskId}": {
+      "schema": { "$ref": "#/entities/TaskProgress" },
+      "description": "Per-student completion status for assignments."
+    },
+    "/users_private/{userId}/notification_state/{docId}": {
+      "schema": { "$ref": "#/entities/NotificationState" },
+      "description": "Per-user notification read state."
+    },
+    "/login_history/{logId}": {
+      "schema": { "$ref": "#/entities/LoginHistory" },
+      "description": "Sign-in audit trail readable exclusively by Owner."
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "$ref": "#/entities/Announcement" },
+      "description": "Class announcements with pin, archive, priority, and real-time notifications."
+    },
+    "/assignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/Assignment" },
+      "description": "Class school homework assignments."
+    },
+    "/schedules/{scheduleId}": {
+      "schema": { "$ref": "#/entities/ScheduleItem" },
+      "description": "Weekly 6-day class lesson schedules."
+    },
+    "/agendas/{agendaId}": {
+      "schema": { "$ref": "#/entities/AgendaItem" },
+      "description": "Upcoming and completed class agendas."
+    },
+    "/treasury/{entryId}": {
+      "schema": { "$ref": "#/entities/TreasuryEntry" },
+      "description": "Class cash (Uang Kas) transactions with audit correction notes."
+    },
+    "/chat_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Real-time class group chat messages."
+    },
+    "/admin_messages/{msgId}": {
+      "schema": { "$ref": "#/entities/AdminMessage" },
+      "description": "Private messages from students to Admins and Owner."
+    },
+    "/notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/NotificationItem" },
+      "description": "Real-time class and user-specific notification feed."
+    },
+    "/activity_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "User activity and data change audit trail."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/ClassSettings" },
+      "description": "Class and permission settings controlled by Owner."
+    }
+  }
+}
