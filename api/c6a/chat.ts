@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { type GenerateContentResponse, GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 const MODEL_NAME = 'gemini-4-hydrogen';
+const FALLBACK_MODEL_NAME = 'gemini-3.1-flash-lite';
 
 interface VercelNodeRequest extends IncomingMessage {
   body?: unknown;
@@ -55,11 +56,74 @@ function getGeminiClient(): GoogleGenAI | null {
   return ai;
 }
 
-function mapGeminiError(error: unknown): { status: number; message: string } {
-  const status =
-    typeof error === 'object' && error !== null && 'status' in error
-      ? Number((error as { status?: unknown }).status)
+function getErrorStatus(error: unknown): number | undefined {
+  if (typeof error === 'object' && error !== null && 'status' in error) {
+    const num = Number((error as { status?: unknown }).status);
+    return Number.isFinite(num) ? num : undefined;
+  }
+  return undefined;
+}
+
+function sanitizeErrorDetail(error: unknown): string {
+  const status = getErrorStatus(error);
+  const rawMsg = error instanceof Error ? error.message : String(error);
+  const causeCode =
+    typeof error === 'object' &&
+    error !== null &&
+    'cause' in error &&
+    typeof (error as { cause?: { code?: unknown } }).cause?.code === 'string'
+      ? (error as { cause?: { code?: string } }).cause?.code
       : undefined;
+
+  const redacted = rawMsg
+    .replace(/AIza[A-Za-z0-9_-]{10,}/g, '[REDACTED_KEY]')
+    .replace(/AQ\.[A-Za-z0-9_.-]{10,}/g, '[REDACTED_KEY]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140);
+
+  const parts = [
+    status ? `HTTP ${status}` : undefined,
+    causeCode ? `Code ${causeCode}` : undefined,
+    redacted || undefined,
+  ].filter(Boolean);
+
+  return parts.join(' · ') || 'Unknown error';
+}
+
+function isTransientOrModelError(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  const msg = (error instanceof Error ? error.message : String(error)).toUpperCase();
+  if (status === 400 || status === 401 || status === 403 || status === 429) {
+    return false;
+  }
+  if (
+    msg.includes('UNAUTHENTICATED') ||
+    msg.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED') ||
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('API KEY NOT VALID') ||
+    msg.includes('PERMISSION_DENIED') ||
+    msg.includes('ACCESS_DENIED') ||
+    msg.includes('RESOURCE_EXHAUSTED')
+  ) {
+    return false;
+  }
+  return (
+    status === 404 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    msg.includes('NOT_FOUND') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('INTERNAL') ||
+    msg.includes('OVERLOADED') ||
+    msg.includes('FETCH FAILED')
+  );
+}
+
+function mapGeminiError(error: unknown): { status: number; message: string } {
+  const status = getErrorStatus(error);
   const msg = error instanceof Error ? error.message : String(error);
   const upper = msg.toUpperCase();
 
@@ -80,7 +144,7 @@ function mapGeminiError(error: unknown): { status: number; message: string } {
     };
   }
   if (status === 400 || upper.includes('INVALID_ARGUMENT')) {
-    console.warn('Vercel C6A AI v1 Bad Request (HTTP 400).');
+    console.warn(`Vercel C6A AI v1 Bad Request (HTTP 400): ${sanitizeErrorDetail(error)}`);
     return {
       status: 400,
       message:
@@ -115,11 +179,11 @@ function mapGeminiError(error: unknown): { status: number; message: string } {
       message: `Model C6A AI v1 (${MODEL_NAME}) belum tersedia pada kunci API saat ini (HTTP 404).`,
     };
   }
-  console.error('Vercel C6A AI v1 Error:', status ?? '', msg);
+  const detail = sanitizeErrorDetail(error);
+  console.error('Vercel C6A AI v1 Error:', detail);
   return {
     status: 500,
-    message:
-      'Terjadi gangguan saat menghubungi layanan C6A AI v1. Pastikan GEMINI_API_KEY di Vercel valid lalu coba kembali.',
+    message: `Terjadi gangguan saat menghubungi layanan C6A AI v1 (${detail}).`,
   };
 }
 
@@ -243,25 +307,55 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
       .filter(Boolean)
       .join('\n');
 
-    const chat = ai.chats.create({
-      model: MODEL_NAME,
-      history: sanitizeHistory(body.history),
-      config: {
-        systemInstruction,
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.LOW,
+    const cleanHistory = sanitizeHistory(body.history);
+    const createChatFor = (modelName: string) =>
+      ai.chats.create({
+        model: modelName,
+        history: cleanHistory,
+        config: {
+          systemInstruction,
+          ...(modelName === MODEL_NAME
+            ? {
+                thinkingConfig: {
+                  thinkingLevel: ThinkingLevel.LOW,
+                },
+              }
+            : {}),
         },
-      },
-    });
+      });
+
+    const attempts: Array<{ model: string; waitMs: number }> = [
+      { model: MODEL_NAME, waitMs: 0 },
+      { model: MODEL_NAME, waitMs: 350 },
+      { model: FALLBACK_MODEL_NAME, waitMs: 0 },
+    ];
 
     if (wantsStream) {
-      let streamResponse: AsyncIterable<unknown>;
-      try {
-        streamResponse = await chat.sendMessageStream({
-          message: rawMessage,
-        });
-      } catch (error) {
-        const mapped = mapGeminiError(error);
+      let streamResponse: AsyncIterable<unknown> | undefined;
+      let modelUsed = MODEL_NAME;
+      let lastErr: unknown;
+
+      for (const attempt of attempts) {
+        if (attempt.waitMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, attempt.waitMs));
+        }
+        try {
+          const chat = createChatFor(attempt.model);
+          streamResponse = await chat.sendMessageStream({ message: rawMessage });
+          modelUsed = attempt.model;
+          break;
+        } catch (error) {
+          lastErr = error;
+          if (!isTransientOrModelError(error)) {
+            const mapped = mapGeminiError(error);
+            sendJson(res, mapped.status, { error: mapped.message });
+            return;
+          }
+        }
+      }
+
+      if (!streamResponse) {
+        const mapped = mapGeminiError(lastErr);
         sendJson(res, mapped.status, { error: mapped.message });
         return;
       }
@@ -301,7 +395,7 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
               })}\n\n`
             );
           } else {
-            res.write(`data: ${JSON.stringify({ done: true, model: MODEL_NAME })}\n\n`);
+            res.write(`data: ${JSON.stringify({ done: true, model: modelUsed })}\n\n`);
           }
           res.end();
         }
@@ -316,9 +410,31 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
     }
 
     try {
-      const response = await chat.sendMessage({
-        message: rawMessage,
-      });
+      let response: GenerateContentResponse | undefined;
+      let modelUsed = MODEL_NAME;
+      let lastErr: unknown;
+
+      for (const attempt of attempts) {
+        if (attempt.waitMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, attempt.waitMs));
+        }
+        try {
+          const chat = createChatFor(attempt.model);
+          response = await chat.sendMessage({ message: rawMessage });
+          modelUsed = attempt.model;
+          break;
+        } catch (error) {
+          lastErr = error;
+          if (!isTransientOrModelError(error)) {
+            throw error;
+          }
+        }
+      }
+
+      if (!response) {
+        throw lastErr;
+      }
+
       const replyText = (response.text ?? '').trim();
       if (!replyText) {
         sendJson(res, 502, {
@@ -330,7 +446,7 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
 
       sendJson(res, 200, {
         reply: replyText,
-        model: MODEL_NAME,
+        model: modelUsed,
       });
     } catch (error) {
       const mapped = mapGeminiError(error);

@@ -4,13 +4,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Request, type Response } from 'express';
 import {
-  createC6AChatSession,
   extractChunkText,
   getGeminiClient,
   mapGeminiError,
   MODEL_NAME,
   parseC6AChatBody,
   resolveGeminiApiKey,
+  sendC6AMessageWithFallback,
+  startC6AStreamWithFallback,
 } from './server/c6aAi.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,14 +46,13 @@ async function startServer() {
       return;
     }
 
-    const chat = createC6AChatSession(ai, parsed.data);
-
     if (parsed.data.wantsStream) {
       let streamResponse: AsyncIterable<unknown>;
+      let modelUsed = MODEL_NAME;
       try {
-        streamResponse = await chat.sendMessageStream({
-          message: parsed.data.message,
-        });
+        const started = await startC6AStreamWithFallback(ai, parsed.data);
+        streamResponse = started.stream;
+        modelUsed = started.modelUsed;
       } catch (error) {
         const mapped = mapGeminiError(error);
         res.status(mapped.status).json({ error: mapped.message });
@@ -92,7 +92,7 @@ async function startServer() {
               })}\n\n`
             );
           } else {
-            res.write(`data: ${JSON.stringify({ done: true, model: MODEL_NAME })}\n\n`);
+            res.write(`data: ${JSON.stringify({ done: true, model: modelUsed })}\n\n`);
           }
           res.end();
         }
@@ -107,21 +107,19 @@ async function startServer() {
     }
 
     try {
-      const response = await chat.sendMessage({
-        message: parsed.data.message,
-      });
+      const { response, modelUsed } = await sendC6AMessageWithFallback(ai, parsed.data);
 
       const replyText = (response.text ?? '').trim();
       if (!replyText) {
         res.status(502).json({
-          error: 'C6A AI belum menerima teks jawaban dari model. Silakan coba ulangi pertanyaan.',
+          error: 'C6A AI v1 belum menerima teks jawaban dari model. Silakan coba ulangi pertanyaan.',
         });
         return;
       }
 
       res.json({
         reply: replyText,
-        model: MODEL_NAME,
+        model: modelUsed,
       });
     } catch (error) {
       const mapped = mapGeminiError(error);

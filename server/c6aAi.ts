@@ -1,6 +1,7 @@
 import { type GenerateContentResponse, GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 export const MODEL_NAME = 'gemini-4-hydrogen';
+export const FALLBACK_MODEL_NAME = 'gemini-3.1-flash-lite';
 export const C6A_AI_VERSION = 'C6A AI v1';
 
 export interface ChatTurnInput {
@@ -57,11 +58,74 @@ export function getGeminiClient(): GoogleGenAI | null {
   return ai;
 }
 
-export function mapGeminiError(error: unknown): { status: number; message: string } {
-  const status =
-    typeof error === 'object' && error !== null && 'status' in error
-      ? Number((error as { status?: unknown }).status)
+function getErrorStatus(error: unknown): number | undefined {
+  if (typeof error === 'object' && error !== null && 'status' in error) {
+    const num = Number((error as { status?: unknown }).status);
+    return Number.isFinite(num) ? num : undefined;
+  }
+  return undefined;
+}
+
+function sanitizeErrorDetail(error: unknown): string {
+  const status = getErrorStatus(error);
+  const rawMsg = error instanceof Error ? error.message : String(error);
+  const causeCode =
+    typeof error === 'object' &&
+    error !== null &&
+    'cause' in error &&
+    typeof (error as { cause?: { code?: unknown } }).cause?.code === 'string'
+      ? (error as { cause?: { code?: string } }).cause?.code
       : undefined;
+
+  const redacted = rawMsg
+    .replace(/AIza[A-Za-z0-9_-]{10,}/g, '[REDACTED_KEY]')
+    .replace(/AQ\.[A-Za-z0-9_.-]{10,}/g, '[REDACTED_KEY]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 140);
+
+  const parts = [
+    status ? `HTTP ${status}` : undefined,
+    causeCode ? `Code ${causeCode}` : undefined,
+    redacted || undefined,
+  ].filter(Boolean);
+
+  return parts.join(' · ') || 'Unknown error';
+}
+
+export function isTransientOrModelError(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  const msg = (error instanceof Error ? error.message : String(error)).toUpperCase();
+  if (status === 400 || status === 401 || status === 403 || status === 429) {
+    return false;
+  }
+  if (
+    msg.includes('UNAUTHENTICATED') ||
+    msg.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED') ||
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('API KEY NOT VALID') ||
+    msg.includes('PERMISSION_DENIED') ||
+    msg.includes('ACCESS_DENIED') ||
+    msg.includes('RESOURCE_EXHAUSTED')
+  ) {
+    return false;
+  }
+  return (
+    status === 404 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    msg.includes('NOT_FOUND') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('INTERNAL') ||
+    msg.includes('OVERLOADED') ||
+    msg.includes('FETCH FAILED')
+  );
+}
+
+export function mapGeminiError(error: unknown): { status: number; message: string } {
+  const status = getErrorStatus(error);
   const msg = error instanceof Error ? error.message : String(error);
   const upper = msg.toUpperCase();
 
@@ -82,7 +146,7 @@ export function mapGeminiError(error: unknown): { status: number; message: strin
     };
   }
   if (status === 400 || upper.includes('INVALID_ARGUMENT')) {
-    console.warn(`C6A AI v1 Bad Request (HTTP 400).`);
+    console.warn(`C6A AI v1 Bad Request (HTTP 400): ${sanitizeErrorDetail(error)}`);
     return {
       status: 400,
       message:
@@ -117,11 +181,11 @@ export function mapGeminiError(error: unknown): { status: number; message: strin
       message: `Model C6A AI v1 (${MODEL_NAME}) belum tersedia pada kunci API saat ini (HTTP 404).`,
     };
   }
-  console.error('C6A AI v1 Unexpected Error:', status ?? '', msg);
+  const detail = sanitizeErrorDetail(error);
+  console.error('C6A AI v1 Unexpected Error:', detail);
   return {
     status: 500,
-    message:
-      'Terjadi gangguan saat menghubungi layanan C6A AI v1. Pastikan GEMINI_API_KEY valid dan coba beberapa saat lagi.',
+    message: `Terjadi gangguan saat menghubungi layanan C6A AI v1 (${detail}).`,
   };
 }
 
@@ -202,17 +266,87 @@ export function parseC6AChatBody(rawBody: unknown):
   };
 }
 
-export function createC6AChatSession(ai: GoogleGenAI, parsed: ParsedC6ARequest) {
+export function createC6AChatSession(
+  ai: GoogleGenAI,
+  parsed: ParsedC6ARequest,
+  modelName: string = MODEL_NAME
+) {
   return ai.chats.create({
-    model: MODEL_NAME,
+    model: modelName,
     history: parsed.history,
     config: {
       systemInstruction: parsed.systemInstruction,
-      thinkingConfig: {
-        thinkingLevel: ThinkingLevel.LOW,
-      },
+      ...(modelName === MODEL_NAME
+        ? {
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.LOW,
+            },
+          }
+        : {}),
     },
   });
+}
+
+async function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function startC6AStreamWithFallback(
+  ai: GoogleGenAI,
+  parsed: ParsedC6ARequest
+): Promise<{ stream: AsyncIterable<unknown>; modelUsed: string }> {
+  const attempts: Array<{ model: string; waitBeforeMs: number }> = [
+    { model: MODEL_NAME, waitBeforeMs: 0 },
+    { model: MODEL_NAME, waitBeforeMs: 350 },
+    { model: FALLBACK_MODEL_NAME, waitBeforeMs: 0 },
+  ];
+
+  let lastError: unknown;
+  for (const attempt of attempts) {
+    if (attempt.waitBeforeMs > 0) {
+      await delayMs(attempt.waitBeforeMs);
+    }
+    try {
+      const chat = createC6AChatSession(ai, parsed, attempt.model);
+      const stream = await chat.sendMessageStream({ message: parsed.message });
+      return { stream, modelUsed: attempt.model };
+    } catch (err) {
+      lastError = err;
+      if (!isTransientOrModelError(err)) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
+export async function sendC6AMessageWithFallback(
+  ai: GoogleGenAI,
+  parsed: ParsedC6ARequest
+): Promise<{ response: GenerateContentResponse; modelUsed: string }> {
+  const attempts: Array<{ model: string; waitBeforeMs: number }> = [
+    { model: MODEL_NAME, waitBeforeMs: 0 },
+    { model: MODEL_NAME, waitBeforeMs: 350 },
+    { model: FALLBACK_MODEL_NAME, waitBeforeMs: 0 },
+  ];
+
+  let lastError: unknown;
+  for (const attempt of attempts) {
+    if (attempt.waitBeforeMs > 0) {
+      await delayMs(attempt.waitBeforeMs);
+    }
+    try {
+      const chat = createC6AChatSession(ai, parsed, attempt.model);
+      const response = await chat.sendMessage({ message: parsed.message });
+      return { response, modelUsed: attempt.model };
+    } catch (err) {
+      lastError = err;
+      if (!isTransientOrModelError(err)) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
 }
 
 export function extractChunkText(chunk: unknown): string {
