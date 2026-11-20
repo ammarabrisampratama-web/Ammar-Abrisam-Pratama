@@ -16,6 +16,7 @@ export interface C6AChatRequestBody {
   userLabel?: unknown;
   userRole?: unknown;
   stream?: unknown;
+  fastMode?: unknown;
 }
 
 export interface ParsedC6ARequest {
@@ -23,6 +24,7 @@ export interface ParsedC6ARequest {
   history: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>;
   systemInstruction: string;
   wantsStream: boolean;
+  fastMode: boolean;
 }
 
 let cachedClient: { apiKey: string; ai: GoogleGenAI } | null = null;
@@ -30,6 +32,8 @@ let cachedClient: { apiKey: string; ai: GoogleGenAI } | null = null;
 export function resolveGeminiApiKey(): string | null {
   const raw = (process.env.GEMINI_API_KEY ?? process.env.API_KEY ?? '').trim();
   const cleaned = raw
+    .replace(/^["']|["']$/g, '')
+    .trim()
     .replace(/^GEMINI_API_KEY\s*=\s*/i, '')
     .replace(/^Bearer\s+/i, '')
     .replace(/^["']|["']$/g, '')
@@ -95,6 +99,7 @@ function sanitizeErrorDetail(error: unknown): string {
 
 export function isTransientOrModelError(error: unknown): boolean {
   const status = getErrorStatus(error);
+  const name = error instanceof Error ? error.name : '';
   const msg = (error instanceof Error ? error.message : String(error)).toUpperCase();
   if (status === 400 || status === 401 || status === 403 || status === 429) {
     return false;
@@ -111,6 +116,8 @@ export function isTransientOrModelError(error: unknown): boolean {
     return false;
   }
   return (
+    name === 'AbortError' ||
+    name === 'TimeoutError' ||
     status === 404 ||
     status === 500 ||
     status === 502 ||
@@ -120,7 +127,9 @@ export function isTransientOrModelError(error: unknown): boolean {
     msg.includes('UNAVAILABLE') ||
     msg.includes('INTERNAL') ||
     msg.includes('OVERLOADED') ||
-    msg.includes('FETCH FAILED')
+    msg.includes('FETCH FAILED') ||
+    msg.includes('ABORT') ||
+    msg.includes('TIMEOUT')
   );
 }
 
@@ -262,6 +271,7 @@ export function parseC6AChatBody(rawBody: unknown):
       history: sanitizeHistory(body.history),
       systemInstruction,
       wantsStream: body.stream === true,
+      fastMode: body.fastMode === true,
     },
   };
 }
@@ -269,13 +279,15 @@ export function parseC6AChatBody(rawBody: unknown):
 export function createC6AChatSession(
   ai: GoogleGenAI,
   parsed: ParsedC6ARequest,
-  modelName: string = MODEL_NAME
+  modelName: string = MODEL_NAME,
+  abortSignal?: AbortSignal
 ) {
   return ai.chats.create({
     model: modelName,
     history: parsed.history,
     config: {
       systemInstruction: parsed.systemInstruction,
+      ...(abortSignal ? { abortSignal } : {}),
       ...(modelName === MODEL_NAME
         ? {
             thinkingConfig: {
@@ -287,28 +299,39 @@ export function createC6AChatSession(
   });
 }
 
-async function delayMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function runWithTimeout<T>(
+  timeoutMs: number,
+  fn: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Request timeout after ${timeoutMs}ms`));
+  }, timeoutMs);
+  try {
+    return await fn(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function startC6AStreamWithFallback(
   ai: GoogleGenAI,
   parsed: ParsedC6ARequest
 ): Promise<{ stream: AsyncIterable<unknown>; modelUsed: string }> {
-  const attempts: Array<{ model: string; waitBeforeMs: number }> = [
-    { model: MODEL_NAME, waitBeforeMs: 0 },
-    { model: MODEL_NAME, waitBeforeMs: 350 },
-    { model: FALLBACK_MODEL_NAME, waitBeforeMs: 0 },
-  ];
+  const attempts: Array<{ model: string; timeoutMs: number }> = parsed.fastMode
+    ? [{ model: FALLBACK_MODEL_NAME, timeoutMs: 8000 }]
+    : [
+        { model: MODEL_NAME, timeoutMs: 4000 },
+        { model: FALLBACK_MODEL_NAME, timeoutMs: 4500 },
+      ];
 
   let lastError: unknown;
   for (const attempt of attempts) {
-    if (attempt.waitBeforeMs > 0) {
-      await delayMs(attempt.waitBeforeMs);
-    }
     try {
-      const chat = createC6AChatSession(ai, parsed, attempt.model);
-      const stream = await chat.sendMessageStream({ message: parsed.message });
+      const stream = await runWithTimeout(attempt.timeoutMs, async (signal) => {
+        const chat = createC6AChatSession(ai, parsed, attempt.model, signal);
+        return chat.sendMessageStream({ message: parsed.message });
+      });
       return { stream, modelUsed: attempt.model };
     } catch (err) {
       lastError = err;
@@ -324,20 +347,20 @@ export async function sendC6AMessageWithFallback(
   ai: GoogleGenAI,
   parsed: ParsedC6ARequest
 ): Promise<{ response: GenerateContentResponse; modelUsed: string }> {
-  const attempts: Array<{ model: string; waitBeforeMs: number }> = [
-    { model: MODEL_NAME, waitBeforeMs: 0 },
-    { model: MODEL_NAME, waitBeforeMs: 350 },
-    { model: FALLBACK_MODEL_NAME, waitBeforeMs: 0 },
-  ];
+  const attempts: Array<{ model: string; timeoutMs: number }> = parsed.fastMode
+    ? [{ model: FALLBACK_MODEL_NAME, timeoutMs: 8000 }]
+    : [
+        { model: MODEL_NAME, timeoutMs: 4000 },
+        { model: FALLBACK_MODEL_NAME, timeoutMs: 4500 },
+      ];
 
   let lastError: unknown;
   for (const attempt of attempts) {
-    if (attempt.waitBeforeMs > 0) {
-      await delayMs(attempt.waitBeforeMs);
-    }
     try {
-      const chat = createC6AChatSession(ai, parsed, attempt.model);
-      const response = await chat.sendMessage({ message: parsed.message });
+      const response = await runWithTimeout(attempt.timeoutMs, async (signal) => {
+        const chat = createC6AChatSession(ai, parsed, attempt.model, signal);
+        return chat.sendMessage({ message: parsed.message });
+      });
       return { response, modelUsed: attempt.model };
     } catch (err) {
       lastError = err;

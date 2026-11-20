@@ -91,18 +91,34 @@ export function ChatView({
     setBotThinking(true);
     const replyId = `c6a-ai-${Date.now()}`;
     try {
-      const res = await fetch('/api/c6a/chat', {
+      const requestBody = {
+        message: extracted.queryText,
+        history: [],
+        contextSummary: buildSanitizedC6AContextSummary(botContext),
+        userLabel: getUserDisplayLabel(profile),
+        userRole: profile.role,
+      };
+
+      let res = await fetch('/api/c6a/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: extracted.queryText,
-          history: [],
-          contextSummary: buildSanitizedC6AContextSummary(botContext),
-          userLabel: getUserDisplayLabel(profile),
-          userRole: profile.role,
+          ...requestBody,
           stream: true,
         }),
       });
+
+      if (res.status === 504 || res.status === 502) {
+        res = await fetch('/api/c6a/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...requestBody,
+            stream: false,
+            fastMode: true,
+          }),
+        });
+      }
 
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('text/event-stream') || !res.body) {
@@ -117,9 +133,11 @@ export function ChatView({
         }
         if (!res.ok || !payload.reply) {
           const fallbackMsg =
-            res.status >= 500
-              ? `Gagal menghubungi C6A AI v1 (HTTP ${res.status}). Pastikan endpoint /api/c6a/chat sudah terdeploy dan GEMINI_API_KEY sudah diisi di Variabel Lingkungan server.`
-              : `Gagal menghubungi C6A AI v1 (HTTP ${res.status}).`;
+            res.status === 504
+              ? 'Server C6A AI v1 melebihi batas waktu respon (HTTP 504). Silakan coba kirim ulang pesan yang lebih singkat.'
+              : res.status >= 500
+                ? `Gagal menghubungi C6A AI v1 (HTTP ${res.status}). Pastikan endpoint /api/c6a/chat sudah terdeploy dan GEMINI_API_KEY sudah diisi di Variabel Lingkungan server.`
+                : `Gagal menghubungi C6A AI v1 (HTTP ${res.status}).`;
           throw new Error(payload.error || fallbackMsg);
         }
         setBotReplies((prev) => [

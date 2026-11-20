@@ -21,6 +21,7 @@ interface C6AChatRequestBody {
   userLabel?: unknown;
   userRole?: unknown;
   stream?: unknown;
+  fastMode?: unknown;
 }
 
 let cachedClient: { apiKey: string; ai: GoogleGenAI } | null = null;
@@ -28,6 +29,8 @@ let cachedClient: { apiKey: string; ai: GoogleGenAI } | null = null;
 function resolveGeminiApiKey(): string | null {
   const raw = (process.env.GEMINI_API_KEY ?? process.env.API_KEY ?? '').trim();
   const cleaned = raw
+    .replace(/^["']|["']$/g, '')
+    .trim()
     .replace(/^GEMINI_API_KEY\s*=\s*/i, '')
     .replace(/^Bearer\s+/i, '')
     .replace(/^["']|["']$/g, '')
@@ -93,6 +96,7 @@ function sanitizeErrorDetail(error: unknown): string {
 
 function isTransientOrModelError(error: unknown): boolean {
   const status = getErrorStatus(error);
+  const name = error instanceof Error ? error.name : '';
   const msg = (error instanceof Error ? error.message : String(error)).toUpperCase();
   if (status === 400 || status === 401 || status === 403 || status === 429) {
     return false;
@@ -109,6 +113,8 @@ function isTransientOrModelError(error: unknown): boolean {
     return false;
   }
   return (
+    name === 'AbortError' ||
+    name === 'TimeoutError' ||
     status === 404 ||
     status === 500 ||
     status === 502 ||
@@ -118,7 +124,9 @@ function isTransientOrModelError(error: unknown): boolean {
     msg.includes('UNAVAILABLE') ||
     msg.includes('INTERNAL') ||
     msg.includes('OVERLOADED') ||
-    msg.includes('FETCH FAILED')
+    msg.includes('FETCH FAILED') ||
+    msg.includes('ABORT') ||
+    msg.includes('TIMEOUT')
   );
 }
 
@@ -292,6 +300,7 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
         ? body.contextSummary.trim().slice(0, 4000)
         : '';
     const wantsStream = body.stream === true;
+    const fastMode = body.fastMode === true;
 
     const systemInstruction = [
       'Kamu adalah C6A AI v1, asisten pintar resmi Portal Digital Kelas 6A MI Al-Hidayah Sawotratap (Berilmu, Berakhlak, Berprestasi).',
@@ -308,12 +317,13 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
       .join('\n');
 
     const cleanHistory = sanitizeHistory(body.history);
-    const createChatFor = (modelName: string) =>
+    const createChatFor = (modelName: string, abortSignal?: AbortSignal) =>
       ai.chats.create({
         model: modelName,
         history: cleanHistory,
         config: {
           systemInstruction,
+          ...(abortSignal ? { abortSignal } : {}),
           ...(modelName === MODEL_NAME
             ? {
                 thinkingConfig: {
@@ -324,11 +334,27 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
         },
       });
 
-    const attempts: Array<{ model: string; waitMs: number }> = [
-      { model: MODEL_NAME, waitMs: 0 },
-      { model: MODEL_NAME, waitMs: 350 },
-      { model: FALLBACK_MODEL_NAME, waitMs: 0 },
-    ];
+    const runWithTimeout = async <T,>(
+      timeoutMs: number,
+      fn: (signal: AbortSignal) => Promise<T>
+    ): Promise<T> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => {
+        controller.abort(new Error(`Request timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+      try {
+        return await fn(controller.signal);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    const attempts: Array<{ model: string; timeoutMs: number }> = fastMode
+      ? [{ model: FALLBACK_MODEL_NAME, timeoutMs: 8000 }]
+      : [
+          { model: MODEL_NAME, timeoutMs: 4000 },
+          { model: FALLBACK_MODEL_NAME, timeoutMs: 4500 },
+        ];
 
     if (wantsStream) {
       let streamResponse: AsyncIterable<unknown> | undefined;
@@ -336,12 +362,11 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
       let lastErr: unknown;
 
       for (const attempt of attempts) {
-        if (attempt.waitMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, attempt.waitMs));
-        }
         try {
-          const chat = createChatFor(attempt.model);
-          streamResponse = await chat.sendMessageStream({ message: rawMessage });
+          streamResponse = await runWithTimeout(attempt.timeoutMs, async (signal) => {
+            const chat = createChatFor(attempt.model, signal);
+            return chat.sendMessageStream({ message: rawMessage });
+          });
           modelUsed = attempt.model;
           break;
         } catch (error) {
@@ -415,12 +440,11 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
       let lastErr: unknown;
 
       for (const attempt of attempts) {
-        if (attempt.waitMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, attempt.waitMs));
-        }
         try {
-          const chat = createChatFor(attempt.model);
-          response = await chat.sendMessage({ message: rawMessage });
+          response = await runWithTimeout(attempt.timeoutMs, async (signal) => {
+            const chat = createChatFor(attempt.model, signal);
+            return chat.sendMessage({ message: rawMessage });
+          });
           modelUsed = attempt.model;
           break;
         } catch (error) {
