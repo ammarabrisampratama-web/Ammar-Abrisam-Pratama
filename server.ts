@@ -10,6 +10,7 @@ import {
   mapGeminiError,
   MODEL_NAME,
   parseC6AChatBody,
+  resolveGeminiApiKey,
 } from './server/c6aAi.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,7 +21,12 @@ async function startServer() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
-    res.json({ ok: true, assistant: 'C6A', model: MODEL_NAME });
+    res.json({
+      ok: true,
+      assistant: 'C6A AI v1',
+      model: MODEL_NAME,
+      hasApiKey: Boolean(resolveGeminiApiKey()),
+    });
   });
 
   app.post('/api/c6a/chat', async (req: Request, res: Response) => {
@@ -34,7 +40,7 @@ async function startServer() {
     if (!ai) {
       res.status(503).json({
         error:
-          'Layanan C6A AI belum aktif karena GEMINI_API_KEY belum terkonfigurasi di Secrets server.',
+          'Layanan C6A AI v1 belum aktif karena GEMINI_API_KEY belum terkonfigurasi di Secrets server.',
       });
       return;
     }
@@ -42,6 +48,17 @@ async function startServer() {
     const chat = createC6AChatSession(ai, parsed.data);
 
     if (parsed.data.wantsStream) {
+      let streamResponse: AsyncIterable<unknown>;
+      try {
+        streamResponse = await chat.sendMessageStream({
+          message: parsed.data.message,
+        });
+      } catch (error) {
+        const mapped = mapGeminiError(error);
+        res.status(mapped.status).json({ error: mapped.message });
+        return;
+      }
+
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
       res.setHeader('Connection', 'keep-alive');
@@ -56,9 +73,6 @@ async function startServer() {
       });
 
       try {
-        const streamResponse = await chat.sendMessageStream({
-          message: parsed.data.message,
-        });
         let emittedChars = 0;
 
         for await (const chunk of streamResponse) {
@@ -74,7 +88,7 @@ async function startServer() {
           if (emittedChars === 0) {
             res.write(
               `data: ${JSON.stringify({
-                error: 'C6A AI belum menerima teks jawaban dari model. Silakan coba ulangi pertanyaan.',
+                error: 'C6A AI v1 belum menerima teks jawaban dari model. Silakan coba ulangi pertanyaan.',
               })}\n\n`
             );
           } else {

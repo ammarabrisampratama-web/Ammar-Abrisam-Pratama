@@ -106,12 +106,21 @@ export function ChatView({
 
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('text/event-stream') || !res.body) {
-        const payload = (await res.json().catch(() => ({}))) as {
-          reply?: string;
-          error?: string;
-        };
+        const rawText = await res.text().catch(() => '');
+        let payload: { reply?: string; error?: string } = {};
+        if (rawText) {
+          try {
+            payload = JSON.parse(rawText) as { reply?: string; error?: string };
+          } catch {
+            payload = {};
+          }
+        }
         if (!res.ok || !payload.reply) {
-          throw new Error(payload.error || `Gagal menghubungi C6A AI (HTTP ${res.status}).`);
+          const fallbackMsg =
+            res.status >= 500
+              ? `Gagal menghubungi C6A AI v1 (HTTP ${res.status}). Pastikan endpoint /api/c6a/chat sudah terdeploy dan GEMINI_API_KEY sudah diisi di Variabel Lingkungan server.`
+              : `Gagal menghubungi C6A AI v1 (HTTP ${res.status}).`;
+          throw new Error(payload.error || fallbackMsg);
         }
         setBotReplies((prev) => [
           ...prev.slice(-4),
@@ -179,6 +188,10 @@ export function ChatView({
           }
         }
       }
+
+      if (!inserted) {
+        throw new Error('C6A AI v1 belum menerima teks jawaban dari model.');
+      }
     } catch (err) {
       setBotReplies((prev) => [
         ...prev.slice(-4),
@@ -243,8 +256,8 @@ export function ChatView({
             <h2 className="text-base font-bold text-[#0B2416]">Chat Kelas 6A</h2>
             <p className="text-xs text-[#52705E]">
               {botAllowed
-                ? 'Diskusi kelas · Ketik /jadwal, /tugas, atau @C6A untuk panggil asisten.'
-                : 'Diskusi kelas · Ketik @C6A <pertanyaan> untuk tanya C6A AI.'}
+                ? 'Diskusi kelas · Ketik /rekap, /jadwal, /tugas, atau @C6A untuk panggil asisten.'
+                : 'Diskusi kelas · Ketik @C6A <pertanyaan> untuk tanya C6A AI v1.'}
             </p>
           </div>
         </div>
@@ -257,7 +270,7 @@ export function ChatView({
               className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white hover:bg-[#E6F4EC] border border-[#96CCA9] text-xs font-semibold text-[#0B6B3A] flex items-center gap-1.5 shrink-0 cursor-pointer"
             >
               <Bot className="w-3.5 h-3.5" />
-              <span>{botAllowed ? 'Bot & AI C6A' : 'C6A AI'}</span>
+              <span>{botAllowed ? 'Bot & AI C6A v1' : 'C6A AI v1'}</span>
             </button>
           )}
 
@@ -349,12 +362,12 @@ export function ChatView({
                   {reply.source === 'bot' ? (
                     <>
                       <Terminal className="w-3.5 h-3.5 text-amber-700" />
-                      <span className="text-amber-800">Bot C6A</span>
+                      <span className="text-amber-800">Bot C6A v1</span>
                     </>
                   ) : (
                     <>
                       <Sparkles className="w-3.5 h-3.5 text-[#0B6B3A]" />
-                      <span className="text-[#0B6B3A]">C6A AI</span>
+                      <span className="text-[#0B6B3A]">C6A AI v1</span>
                     </>
                   )}
                   <span className="text-[#52705E] font-normal">· Respons untuk Anda</span>
@@ -398,8 +411,8 @@ export function ChatView({
             onChange={(e) => setText(e.target.value)}
             placeholder={
               botAllowed
-                ? 'Tulis pesan, /jadwal, /tugas, atau @C6A <pertanyaan>...'
-                : 'Tulis pesan atau @C6A <pertanyaan> untuk tanya C6A AI...'
+                ? 'Tulis pesan, /rekap, /jadwal, /tugas, atau @C6A <pertanyaan>...'
+                : 'Tulis pesan atau @C6A <pertanyaan> untuk tanya C6A AI v1...'
             }
             aria-label="Tulis pesan chat kelas"
             className="flex-1 min-h-[44px] px-4 rounded-xl bg-white border border-[#B9D8C2] text-sm text-[#0B2416] placeholder:text-[#6E8B79] focus:outline-none focus:border-[#0B6B3A]"

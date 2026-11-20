@@ -43,7 +43,7 @@ export const NAV_ITEMS: NavItemConfig[] = [
   { id: 'kas', label: 'Uang Kas', shortLabel: 'Kas', icon: Wallet },
   { id: 'chat', label: 'Chat Kelas', shortLabel: 'Chat', icon: MessageSquare },
   { id: 'pesan-admin', label: 'Pesan untuk Admin', shortLabel: 'Admin', icon: Inbox },
-  { id: 'c6a-ai', label: 'Bot & AI C6A', shortLabel: 'C6A AI', icon: Bot },
+  { id: 'c6a-ai', label: 'Bot & AI C6A v1', shortLabel: 'C6A AI', icon: Bot },
   { id: 'profil', label: 'Profil Saya', shortLabel: 'Profil', icon: UserCircle },
   { id: 'bantuan', label: 'Pusat Bantuan', shortLabel: 'Bantuan', icon: HelpCircle },
   { id: 'owner-panel', label: 'Panel Owner', shortLabel: 'Owner', icon: Shield },
@@ -51,7 +51,7 @@ export const NAV_ITEMS: NavItemConfig[] = [
 
 export function getNavItemLabel(item: NavItemConfig, role: UserPublic['role'] | null | undefined): string {
   if (item.id === 'c6a-ai') {
-    return canUseC6ABot(role) ? 'Bot & AI C6A' : 'C6A AI';
+    return canUseC6ABot(role) ? 'Bot & AI C6A v1' : 'C6A AI v1';
   }
   return item.label;
 }

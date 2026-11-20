@@ -686,8 +686,20 @@ export default function App() {
       announcements,
       agendas,
       treasury,
+      members,
+      adminMessages,
     }),
-    [settings, effectiveSchedules.items, assignments, taskProgressMap, announcements, agendas, treasury]
+    [
+      settings,
+      effectiveSchedules.items,
+      assignments,
+      taskProgressMap,
+      announcements,
+      agendas,
+      treasury,
+      members,
+      adminMessages,
+    ]
   );
 
   const handleInitSchedule = async () => {

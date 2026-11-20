@@ -16,18 +16,23 @@ interface C6AAssistantViewProps {
 
 const QUICK_BOT_COMMANDS = [
   { label: '/menu', cmd: '/menu' },
+  { label: '/rekap', cmd: '/rekap' },
   { label: '/jadwal', cmd: '/jadwal' },
+  { label: '/jadwal besok', cmd: '/jadwal besok' },
   { label: '/jadwal lengkap', cmd: '/jadwal lengkap' },
   { label: '/tugas', cmd: '/tugas' },
+  { label: '/tugas terlambat', cmd: '/tugas terlambat' },
   { label: '/pengumuman', cmd: '/pengumuman' },
   { label: '/agenda', cmd: '/agenda' },
   { label: '/kas', cmd: '/kas' },
+  { label: '/anggota', cmd: '/anggota' },
+  { label: '/pesan', cmd: '/pesan' },
 ];
 
 const AI_STARTER_PROMPTS = [
-  'Ringkas jadwal, tugas aktif, dan agenda minggu ini',
-  'Jelaskan cara menghitung pecahan dan persen untuk kelas 6',
-  'Buatkan 3 soal latihan IPAS kelas 6 beserta pembahasannya',
+  'Ringkas jadwal hari ini & besok beserta tugas terdekat',
+  'Jelaskan cara menghitung pecahan, desimal, dan persen kelas 6',
+  'Buatkan 3 soal latihan IPAS kelas 6 beserta kunci dan pembahasannya',
 ];
 
 function formatNowTimeLabel(): string {
@@ -46,12 +51,12 @@ function createWelcomeMessage(nickname: string, botAllowed: boolean): C6AConvers
     createdAtLabel: formatNowTimeLabel(),
     text: botAllowed
       ? [
-          `Halo ${nickname}! Saya C6A, Bot & Asisten AI resmi Kelas 6A MI Al-Hidayah Sawotratap.`,
-          'Sebagai Admin/Owner, Anda dapat memakai perintah cepat Bot C6A (/jadwal, /tugas, /pengumuman, /agenda, /kas) maupun bertanya langsung ke C6A AI.',
+          `Halo ${nickname}! Selamat datang di Bot C6A v1 & C6A AI v1 resmi Kelas 6A MI Al-Hidayah Sawotratap.`,
+          'Sebagai Admin/Owner, Anda dapat memakai perintah cepat Bot C6A v1 (/rekap, /jadwal besok, /tugas terlambat, /kas, /anggota, /pesan) maupun bertanya langsung ke C6A AI v1.',
         ].join('\n\n')
       : [
-          `Halo ${nickname}! Saya C6A AI, asisten belajar pintar Kelas 6A MI Al-Hidayah Sawotratap.`,
-          'Tulis pertanyaan apa saja seputar jadwal, tugas, agenda kelas, atau materi pelajaran kelas 6 untuk dibantu oleh C6A AI.',
+          `Halo ${nickname}! Saya C6A AI v1, asisten belajar pintar Kelas 6A MI Al-Hidayah Sawotratap.`,
+          'Tulis pertanyaan apa saja seputar jadwal, tugas, agenda kelas, atau materi pelajaran kelas 6 untuk dibantu langsung oleh C6A AI v1.',
         ].join('\n\n'),
   };
 }
@@ -137,14 +142,21 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
 
       const contentType = res.headers.get('content-type') || '';
       if (!res.ok || !contentType.includes('text/event-stream') || !res.body) {
-        const payload = (await res.json().catch(() => ({}))) as {
-          reply?: string;
-          error?: string;
-        };
+        const rawText = await res.text().catch(() => '');
+        let payload: { reply?: string; error?: string } = {};
+        if (rawText) {
+          try {
+            payload = JSON.parse(rawText) as { reply?: string; error?: string };
+          } catch {
+            payload = {};
+          }
+        }
         if (!res.ok || !payload.reply) {
-          throw new Error(
-            payload.error || `Gagal menghubungi C6A AI (HTTP ${res.status}).`
-          );
+          const fallbackMsg =
+            res.status >= 500
+              ? `Gagal menghubungi C6A AI v1 (HTTP ${res.status}). Pastikan endpoint /api/c6a/chat sudah terdeploy dan GEMINI_API_KEY sudah diisi di Variabel Lingkungan server.`
+              : `Gagal menghubungi C6A AI v1 (HTTP ${res.status}).`;
+          throw new Error(payload.error || fallbackMsg);
         }
         setMessages((prev) => [
           ...prev,
@@ -240,22 +252,22 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-12rem)] lg:h-[calc(100vh-8.5rem)] bg-white border border-[#D3E6D8] rounded-2xl overflow-hidden">
+    <div className="flex flex-col h-[calc(100dvh-10rem)] min-h-[440px] lg:h-[calc(100vh-8.5rem)] bg-white border border-[#D3E6D8] rounded-2xl overflow-hidden">
       {/* Header */}
-      <div className="px-4 sm:px-5 py-3.5 bg-[#F0F7F2] border-b border-[#E2EFE6] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
+      <div className="px-3.5 sm:px-5 py-3 bg-[#F0F7F2] border-b border-[#E2EFE6] flex items-center justify-between gap-2.5 shrink-0">
+        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
           <div className="w-9 h-9 rounded-xl bg-[#0B6B3A] flex items-center justify-center shrink-0">
             <Bot className="w-5 h-5 text-white" />
           </div>
           <div className="min-w-0">
-            <h2 className="text-base font-bold text-[#0B2416] flex items-center gap-2">
-              <span>{botAllowed ? 'Bot & AI C6A' : 'C6A AI'}</span>
-              <span className="text-[11px] font-semibold text-amber-700">Asisten Kelas 6A</span>
+            <h2 className="text-sm sm:text-base font-bold text-[#0B2416] flex items-center gap-1.5 flex-wrap">
+              <span>{botAllowed ? 'Bot & AI C6A v1' : 'C6A AI v1'}</span>
+              <span className="text-[11px] font-semibold text-amber-700">Kelas 6A</span>
             </h2>
-            <p className="text-xs text-[#52705E] truncate">
+            <p className="text-[11px] sm:text-xs text-[#52705E] truncate">
               {botAllowed
-                ? 'Perintah cepat Bot C6A (Admin/Owner) dan tanya jawab belajar C6A AI.'
-                : 'Asisten tanya jawab materi pelajaran & informasi Kelas 6A untuk seluruh siswa.'}
+                ? 'Bot C6A v1 (Admin/Owner) & C6A AI v1.'
+                : 'Asisten tanya jawab materi & info Kelas 6A (v1).'}
             </p>
           </div>
         </div>
@@ -264,10 +276,12 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
           type="button"
           onClick={handleReset}
           disabled={busy}
-          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white hover:bg-[#E6F4EC] border border-[#C6E0CE] text-xs font-semibold text-[#0B2416] flex items-center gap-1.5 self-start sm:self-auto cursor-pointer disabled:opacity-50"
+          aria-label="Bersihkan Chat"
+          className="min-h-[36px] px-2.5 sm:px-3 py-1.5 rounded-xl bg-white hover:bg-[#E6F4EC] border border-[#C6E0CE] text-xs font-semibold text-[#0B2416] flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50"
         >
           <RotateCcw className="w-3.5 h-3.5 text-[#0B6B3A]" />
-          <span>Bersihkan Chat</span>
+          <span className="hidden sm:inline">Bersihkan Chat</span>
+          <span className="sm:hidden">Reset</span>
         </button>
       </div>
 
@@ -277,7 +291,7 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
           <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
             <span className="text-[11px] font-semibold text-[#52705E] flex items-center gap-1 shrink-0">
               <Terminal className="w-3.5 h-3.5 text-[#0B6B3A]" />
-              <span>Bot:</span>
+              <span>Bot v1:</span>
             </span>
             {QUICK_BOT_COMMANDS.map((item) => (
               <button
@@ -296,7 +310,7 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
         <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
           <span className="text-[11px] font-semibold text-[#52705E] flex items-center gap-1 shrink-0">
             <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-            <span>Tanya AI:</span>
+            <span>AI v1:</span>
           </span>
           {AI_STARTER_PROMPTS.map((prompt) => (
             <button
@@ -333,12 +347,12 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
                     ) : msg.source === 'bot' ? (
                       <>
                         <Terminal className="w-3.5 h-3.5 text-amber-700" />
-                        <span className="text-amber-800">Bot C6A</span>
+                        <span className="text-amber-800">Bot C6A v1</span>
                       </>
                     ) : (
                       <>
                         <Sparkles className="w-3.5 h-3.5 text-[#0B6B3A]" />
-                        <span className="text-[#0B6B3A]">C6A AI</span>
+                        <span className="text-[#0B6B3A]">C6A AI v1</span>
                       </>
                     )}
                   </span>
@@ -390,8 +404,8 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
             onChange={(e) => setInput(e.target.value)}
             placeholder={
               botAllowed
-                ? 'Ketik /jadwal, /tugas, /kas atau tanya C6A AI...'
-                : 'Tulis pertanyaan pelajaran atau info Kelas 6A untuk C6A AI...'
+                ? 'Ketik /rekap, /jadwal, /tugas, /kas atau tanya C6A AI v1...'
+                : 'Tulis pertanyaan pelajaran atau info Kelas 6A untuk C6A AI v1...'
             }
             aria-label="Tulis perintah atau pertanyaan untuk C6A"
             disabled={busy}
