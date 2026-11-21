@@ -85,20 +85,37 @@ service cloud.firestore {
       return t is string && (t == '' || (t.size() == 5 && t.matches('^\\d{2}:\\d{2}$')));
     }
 
+    function isSystemRoom(roomId) {
+      return roomId in ['kelas-6a', 'game-ff', 'game-mlbb', 'game-roblox', 'game-fc-mobile'];
+    }
+
+    function canAccessRoom(roomId) {
+      return isSystemRoom(roomId)
+        || (exists(/databases/$(database)/documents/chat_rooms/$(roomId))
+          && (
+            get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.type != 'dm'
+            || request.auth.uid in get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.participantIds
+            || isOwner()
+          ));
+    }
+
     // --- Validation Blueprints ---
     function isValidUserPublic(data) {
       return data.keys().hasAll(['uid', 'displayName', 'nickname', 'photoURL', 'absenNumber', 'role', 'status', 'classId', 'lastLoginAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'displayName', 'nickname', 'photoURL', 'absenNumber', 'role', 'status', 'classId', 'lastLoginAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'nickname', 'photoURL', 'absenNumber', 'role', 'status', 'classId', 'lastLoginAt', 'updatedAt', 'bio', 'gameIds', 'hideOnlineStatus'])
         && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
         && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 40
-        && data.photoURL is string && data.photoURL.size() <= 500
+        && data.photoURL is string && data.photoURL.size() <= 1000
         && data.absenNumber is int && data.absenNumber >= 0 && data.absenNumber <= 60
         && data.role in ['owner', 'admin', 'siswa']
         && data.status in ['aktif', 'nonaktif']
         && data.classId == '6A'
         && data.lastLoginAt is timestamp
-        && data.updatedAt == request.time;
+        && data.updatedAt == request.time
+        && (!('bio' in data) || (data.bio is string && data.bio.size() <= 200))
+        && (!('gameIds' in data) || (data.gameIds is map && data.gameIds.size() <= 6))
+        && (!('hideOnlineStatus' in data) || data.hideOnlineStatus is bool);
     }
 
     function isValidUserPrivate(data) {
@@ -108,6 +125,23 @@ service cloud.firestore {
         && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
         && data.createdAt is timestamp
         && data.lastLoginAt == request.time;
+    }
+
+    function isValidPresence(data) {
+      return data.keys().hasAll(['uid', 'isOnline', 'hideOnlineStatus', 'lastSeenAt'])
+        && data.keys().hasOnly(['uid', 'isOnline', 'hideOnlineStatus', 'lastSeenAt'])
+        && isValidId(data.uid)
+        && data.isOnline is bool
+        && data.hideOnlineStatus is bool
+        && data.lastSeenAt == request.time;
+    }
+
+    function isValidBlockedUser(data) {
+      return data.keys().hasAll(['targetUid', 'targetName', 'blockedAt'])
+        && data.keys().hasOnly(['targetUid', 'targetName', 'blockedAt'])
+        && isValidId(data.targetUid)
+        && data.targetName is string && data.targetName.size() >= 1 && data.targetName.size() <= 80
+        && data.blockedAt == request.time;
     }
 
     function isValidTaskProgress(data) {
@@ -193,6 +227,19 @@ service cloud.firestore {
         && data.updatedAt == request.time;
     }
 
+    function isValidPicketSchedule(data) {
+      return data.keys().hasAll(['classId', 'day', 'students', 'tasks', 'coordinator', 'note', 'updatedById', 'updatedAt'])
+        && data.keys().hasOnly(['classId', 'day', 'students', 'tasks', 'coordinator', 'note', 'updatedById', 'updatedAt'])
+        && data.classId == '6A'
+        && data.day in ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+        && data.students is list && data.students.size() <= 20
+        && data.tasks is list && data.tasks.size() >= 1 && data.tasks.size() <= 15
+        && data.coordinator is string && data.coordinator.size() <= 80
+        && data.note is string && data.note.size() <= 200
+        && isValidId(data.updatedById)
+        && data.updatedAt == request.time;
+    }
+
     function isValidAgendaItem(data) {
       return data.keys().hasAll(['classId', 'title', 'description', 'eventDate', 'eventTime', 'location', 'status', 'authorId', 'authorName', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['classId', 'title', 'description', 'eventDate', 'eventTime', 'location', 'status', 'authorId', 'authorName', 'createdAt', 'updatedAt'])
@@ -239,6 +286,127 @@ service cloud.firestore {
         && data.createdAt == request.time;
     }
 
+    function isValidChatRoom(data) {
+      return data.keys().hasAll(['roomId', 'classId', 'type', 'name', 'description', 'gameId', 'participantIds', 'pinnedMessageId', 'pinnedText', 'pinnedByName', 'lastMessageText', 'lastMessageSenderId', 'lastMessageAt', 'createdBy', 'updatedAt'])
+        && data.keys().hasOnly(['roomId', 'classId', 'type', 'name', 'description', 'gameId', 'participantIds', 'pinnedMessageId', 'pinnedText', 'pinnedByName', 'lastMessageText', 'lastMessageSenderId', 'lastMessageAt', 'createdBy', 'updatedAt'])
+        && isValidId(data.roomId)
+        && data.classId == '6A'
+        && data.type in ['class', 'group', 'game', 'dm']
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.description is string && data.description.size() <= 240
+        && data.gameId is string && data.gameId.size() <= 20
+        && data.participantIds is list && data.participantIds.size() <= 60
+        && data.pinnedMessageId is string && data.pinnedMessageId.size() <= 128
+        && data.pinnedText is string && data.pinnedText.size() <= 300
+        && data.pinnedByName is string && data.pinnedByName.size() <= 80
+        && data.lastMessageText is string && data.lastMessageText.size() <= 240
+        && data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 128
+        && data.lastMessageAt is timestamp
+        && isValidId(data.createdBy)
+        && data.updatedAt == request.time;
+    }
+
+    function isValidRoomMessage(data) {
+      return data.keys().hasAll(['roomId', 'classId', 'senderId', 'senderName', 'senderRole', 'senderPhoto', 'messageType', 'text', 'mediaUrls', 'mediaNames', 'mediaDurationSec', 'replyTo', 'forwardedFrom', 'reactions', 'readBy', 'deleted', 'moderatedBy', 'editedAt', 'createdAt'])
+        && data.keys().hasOnly(['roomId', 'classId', 'senderId', 'senderName', 'senderRole', 'senderPhoto', 'messageType', 'text', 'mediaUrls', 'mediaNames', 'mediaDurationSec', 'replyTo', 'forwardedFrom', 'reactions', 'readBy', 'deleted', 'moderatedBy', 'editedAt', 'createdAt'])
+        && isValidId(data.roomId)
+        && data.classId == '6A'
+        && isValidId(data.senderId)
+        && data.senderName is string && data.senderName.size() >= 2 && data.senderName.size() <= 80
+        && data.senderRole in ['owner', 'admin', 'siswa']
+        && data.senderPhoto is string && data.senderPhoto.size() <= 1000
+        && data.messageType in ['text', 'image', 'video', 'audio']
+        && data.text is string && data.text.size() <= 1500
+        && data.mediaUrls is list && data.mediaUrls.size() <= 5
+        && data.mediaNames is list && data.mediaNames.size() <= 5
+        && data.mediaDurationSec is number && data.mediaDurationSec >= 0 && data.mediaDurationSec <= 600
+        && (data.replyTo == null || data.replyTo is map)
+        && data.forwardedFrom is string && data.forwardedFrom.size() <= 100
+        && data.reactions is map && data.reactions.size() <= 12
+        && data.readBy is list && data.readBy.size() <= 80
+        && data.deleted is bool
+        && data.moderatedBy is string && data.moderatedBy.size() <= 80
+        && (data.editedAt == null || data.editedAt is timestamp)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidTypingIndicator(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.updatedAt == request.time;
+    }
+
+    function isValidGameCommunity(data) {
+      return data.keys().hasAll(['gameId', 'classId', 'name', 'shortName', 'genre', 'description', 'rules', 'bannerUrl', 'accentColor', 'updatedAt'])
+        && data.keys().hasOnly(['gameId', 'classId', 'name', 'shortName', 'genre', 'description', 'rules', 'bannerUrl', 'accentColor', 'updatedAt'])
+        && data.gameId in ['ff', 'mlbb', 'roblox', 'fc-mobile']
+        && data.classId == '6A'
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 80
+        && data.shortName is string && data.shortName.size() >= 1 && data.shortName.size() <= 20
+        && data.genre is string && data.genre.size() <= 60
+        && data.description is string && data.description.size() <= 500
+        && data.rules is string && data.rules.size() <= 500
+        && data.bannerUrl is string && data.bannerUrl.size() <= 500
+        && data.accentColor is string && data.accentColor.size() <= 20
+        && data.updatedAt == request.time;
+    }
+
+    function isValidGameMembership(data) {
+      return data.keys().hasAll(['uid', 'gameId', 'classId', 'displayName', 'nickname', 'photoURL', 'role', 'inGameName', 'inGameId', 'lfgStatus', 'lfgNote', 'joinedAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'gameId', 'classId', 'displayName', 'nickname', 'photoURL', 'role', 'inGameName', 'inGameId', 'lfgStatus', 'lfgNote', 'joinedAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.gameId in ['ff', 'mlbb', 'roblox', 'fc-mobile']
+        && data.classId == '6A'
+        && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 80
+        && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 40
+        && data.photoURL is string && data.photoURL.size() <= 1000
+        && data.role in ['owner', 'admin', 'siswa']
+        && data.inGameName is string && data.inGameName.size() <= 50
+        && data.inGameId is string && data.inGameId.size() <= 50
+        && data.lfgStatus in ['offline', 'siap-mabar', 'dalam-game', 'santai']
+        && data.lfgNote is string && data.lfgNote.size() <= 120
+        && data.joinedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidGamePost(data) {
+      return data.keys().hasAll(['gameId', 'classId', 'type', 'title', 'content', 'pinned', 'authorId', 'authorName', 'authorRole', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['gameId', 'classId', 'type', 'title', 'content', 'pinned', 'authorId', 'authorName', 'authorRole', 'createdAt', 'updatedAt'])
+        && data.gameId in ['ff', 'mlbb', 'roblox', 'fc-mobile']
+        && data.classId == '6A'
+        && data.type in ['update', 'pengumuman']
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 120
+        && data.content is string && data.content.size() >= 3 && data.content.size() <= 1500
+        && data.pinned is bool
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 2 && data.authorName.size() <= 80
+        && data.authorRole in ['owner', 'admin', 'siswa']
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidUserReport(data) {
+      return data.keys().hasAll(['classId', 'reporterId', 'reporterName', 'targetUid', 'targetName', 'roomId', 'messageId', 'messageExcerpt', 'category', 'reason', 'status', 'resolutionNote', 'resolvedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['classId', 'reporterId', 'reporterName', 'targetUid', 'targetName', 'roomId', 'messageId', 'messageExcerpt', 'category', 'reason', 'status', 'resolutionNote', 'resolvedBy', 'createdAt', 'updatedAt'])
+        && data.classId == '6A'
+        && isValidId(data.reporterId)
+        && data.reporterName is string && data.reporterName.size() >= 2 && data.reporterName.size() <= 80
+        && isValidId(data.targetUid)
+        && data.targetName is string && data.targetName.size() >= 1 && data.targetName.size() <= 80
+        && data.roomId is string && data.roomId.size() <= 128
+        && data.messageId is string && data.messageId.size() <= 128
+        && data.messageExcerpt is string && data.messageExcerpt.size() <= 300
+        && data.category in ['spam', 'penipuan', 'perundungan', 'info-pribadi', 'lainnya']
+        && data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 500
+        && data.status in ['menunggu', 'ditindak', 'diabaikan']
+        && data.resolutionNote is string && data.resolutionNote.size() <= 300
+        && data.resolvedBy is string && data.resolvedBy.size() <= 80
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
     function isValidAdminMessage(data) {
       return data.keys().hasAll(['classId', 'senderId', 'senderName', 'category', 'subject', 'message', 'status', 'adminReply', 'repliedBy', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['classId', 'senderId', 'senderName', 'category', 'subject', 'message', 'status', 'adminReply', 'repliedBy', 'createdAt', 'updatedAt'])
@@ -259,7 +427,7 @@ service cloud.firestore {
       return data.keys().hasAll(['classId', 'type', 'title', 'body', 'targetTab', 'targetUid', 'actorId', 'actorName', 'createdAt'])
         && data.keys().hasOnly(['classId', 'type', 'title', 'body', 'targetTab', 'targetUid', 'actorId', 'actorName', 'createdAt'])
         && data.classId == '6A'
-        && data.type in ['pengumuman', 'tugas', 'jadwal', 'agenda', 'pesan-admin', 'info']
+        && data.type in ['pengumuman', 'tugas', 'jadwal', 'agenda', 'pesan-admin', 'game', 'chat', 'info']
         && data.title is string && data.title.size() >= 2 && data.title.size() <= 120
         && data.body is string && data.body.size() >= 1 && data.body.size() <= 300
         && data.targetTab is string && data.targetTab.size() <= 40
@@ -286,7 +454,7 @@ service cloud.firestore {
 
     function isValidClassSettings(data) {
       return data.keys().hasAll(['classId', 'homeroomTeacher', 'academicYear', 'motto', 'adminContactNote', 'weeklyKasTarget', 'allowStudentCreateTask', 'allowStudentCreateAgenda', 'allowAdminManageTreasury', 'allowAdminManageSchedule', 'updatedAt'])
-        && data.keys().hasOnly(['classId', 'homeroomTeacher', 'academicYear', 'motto', 'adminContactNote', 'weeklyKasTarget', 'allowStudentCreateTask', 'allowStudentCreateAgenda', 'allowAdminManageTreasury', 'allowAdminManageSchedule', 'updatedAt'])
+        && data.keys().hasOnly(['classId', 'homeroomTeacher', 'academicYear', 'motto', 'adminContactNote', 'weeklyKasTarget', 'allowStudentCreateTask', 'allowStudentCreateAgenda', 'allowAdminManageTreasury', 'allowAdminManageSchedule', 'whatsappGroupUrl', 'allowGameCenter', 'allowVoiceNotes', 'allowMediaUpload', 'allowPrivateChat', 'updatedAt'])
         && data.classId == '6A'
         && data.homeroomTeacher is string && data.homeroomTeacher.size() >= 2 && data.homeroomTeacher.size() <= 80
         && data.academicYear is string && data.academicYear.size() >= 4 && data.academicYear.size() <= 30
@@ -297,6 +465,11 @@ service cloud.firestore {
         && data.allowStudentCreateAgenda is bool
         && data.allowAdminManageTreasury is bool
         && data.allowAdminManageSchedule is bool
+        && (!('whatsappGroupUrl' in data) || (data.whatsappGroupUrl is string && data.whatsappGroupUrl.size() <= 300))
+        && (!('allowGameCenter' in data) || data.allowGameCenter is bool)
+        && (!('allowVoiceNotes' in data) || data.allowVoiceNotes is bool)
+        && (!('allowMediaUpload' in data) || data.allowMediaUpload is bool)
+        && (!('allowPrivateChat' in data) || data.allowPrivateChat is bool)
         && data.updatedAt == request.time;
     }
 
@@ -321,13 +494,13 @@ service cloud.firestore {
         && (
           (isOwner()
             && (userId == request.auth.uid || incoming().role in ['admin', 'siswa'])
-            && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'displayName', 'nickname', 'photoURL', 'absenNumber', 'lastLoginAt', 'updatedAt']))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'displayName', 'nickname', 'photoURL', 'absenNumber', 'lastLoginAt', 'updatedAt', 'bio', 'gameIds', 'hideOnlineStatus']))
           ||
           (isSelf(userId)
             && existing().status == 'aktif'
             && incoming().role == existing().role
             && incoming().status == existing().status
-            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'photoURL', 'absenNumber', 'lastLoginAt', 'updatedAt']))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'photoURL', 'absenNumber', 'lastLoginAt', 'updatedAt', 'bio', 'gameIds', 'hideOnlineStatus']))
         );
       allow delete: if isValidId(userId) && isOwner() && userId != request.auth.uid;
     }
@@ -380,6 +553,26 @@ service cloud.firestore {
           && incoming().diff(existing()).affectedKeys().hasOnly(['readIds', 'lastReadAt']);
         allow delete: if false;
       }
+
+      match /blocked_users/{targetUid} {
+        allow get: if isValidId(userId) && isValidId(targetUid) && isSelf(userId);
+        allow list: if isValidId(userId) && isSelf(userId);
+        allow create, update: if isValidId(userId) && isValidId(targetUid)
+          && isSelf(userId)
+          && isValidBlockedUser(incoming())
+          && incoming().targetUid == targetUid;
+        allow delete: if isValidId(userId) && isValidId(targetUid) && isSelf(userId);
+      }
+    }
+
+    match /presence/{userId} {
+      allow get: if isValidId(userId) && isSignedIn();
+      allow list: if isSignedIn();
+      allow create, update: if isValidId(userId)
+        && isSelf(userId)
+        && isValidPresence(incoming())
+        && incoming().uid == userId;
+      allow delete: if isValidId(userId) && isOwner();
     }
 
     match /login_history/{logId} {
@@ -455,6 +648,16 @@ service cloud.firestore {
       allow delete: if isValidId(scheduleId) && canAdminSchedule();
     }
 
+    match /picket_schedules/{picketId} {
+      allow get: if isValidId(picketId) && isActiveMember();
+      allow list: if isSignedIn() && resource.data.classId == '6A';
+      allow create, update: if isValidId(picketId)
+        && isAdminOrOwner()
+        && isValidPicketSchedule(incoming())
+        && incoming().updatedById == request.auth.uid;
+      allow delete: if isValidId(picketId) && isOwner();
+    }
+
     match /agendas/{agendaId} {
       allow get: if isValidId(agendaId) && isActiveMember();
       allow list: if isSignedIn() && resource.data.classId == '6A';
@@ -504,6 +707,154 @@ service cloud.firestore {
       allow delete: if isValidId(messageId)
         && isActiveMember()
         && (existing().senderId == request.auth.uid || isAdminOrOwner());
+    }
+
+    match /chat_rooms/{roomId} {
+      allow get: if isValidId(roomId)
+        && isActiveMember()
+        && (existing().type != 'dm' || request.auth.uid in existing().participantIds || isOwner());
+      allow list: if isSignedIn() && (
+        resource.data.type in ['class', 'group', 'game']
+        || request.auth.uid in resource.data.participantIds
+        || isBootstrappedOwner()
+      );
+      allow create: if isValidId(roomId)
+        && isActiveMember()
+        && isValidChatRoom(incoming())
+        && incoming().roomId == roomId
+        && incoming().createdBy == request.auth.uid
+        && (
+          (incoming().type in ['class', 'game'] && isSystemRoom(roomId))
+          || (incoming().type == 'group' && isAdminOrOwner())
+          || (incoming().type == 'dm' && request.auth.uid in incoming().participantIds && incoming().participantIds.size() == 2)
+        );
+      allow update: if isValidId(roomId)
+        && isActiveMember()
+        && isValidChatRoom(incoming())
+        && incoming().roomId == existing().roomId
+        && incoming().type == existing().type
+        && (existing().type != 'dm' || request.auth.uid in existing().participantIds || isOwner())
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageText', 'lastMessageSenderId', 'lastMessageAt', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['pinnedMessageId', 'pinnedText', 'pinnedByName', 'updatedAt'])
+          || (isAdminOrOwner() && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'pinnedMessageId', 'pinnedText', 'pinnedByName', 'updatedAt']))
+        );
+      allow delete: if isValidId(roomId) && isAdminOrOwner() && !isSystemRoom(roomId);
+
+      match /messages/{messageId} {
+        allow get: if isValidId(roomId) && isValidId(messageId) && isActiveMember() && canAccessRoom(roomId);
+        allow list: if isValidId(roomId) && isActiveMember() && canAccessRoom(roomId);
+        allow create: if isValidId(roomId) && isValidId(messageId)
+          && isActiveMember()
+          && canAccessRoom(roomId)
+          && isValidRoomMessage(incoming())
+          && incoming().roomId == roomId
+          && incoming().senderId == request.auth.uid
+          && incoming().createdAt == request.time
+          && (
+            incoming().senderRole == 'siswa'
+            || (incoming().senderRole == 'admin' && isAdminOrOwner())
+            || (incoming().senderRole == 'owner' && isOwner())
+          );
+        allow update: if isValidId(roomId) && isValidId(messageId)
+          && isActiveMember()
+          && canAccessRoom(roomId)
+          && isValidRoomMessage(incoming())
+          && incoming().roomId == existing().roomId
+          && incoming().senderId == existing().senderId
+          && incoming().createdAt == existing().createdAt
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'readBy'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['reactions'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['readBy'])
+            || (existing().senderId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'editedAt']))
+            || ((existing().senderId == request.auth.uid || isAdminOrOwner())
+              && incoming().diff(existing()).affectedKeys().hasOnly(['deleted', 'text', 'mediaUrls', 'moderatedBy']))
+          );
+        allow delete: if isValidId(roomId) && isValidId(messageId)
+          && isActiveMember()
+          && (existing().senderId == request.auth.uid || isAdminOrOwner());
+      }
+
+      match /typing/{userId} {
+        allow get: if isValidId(roomId) && isValidId(userId) && isActiveMember() && canAccessRoom(roomId);
+        allow list: if isValidId(roomId) && isActiveMember() && canAccessRoom(roomId);
+        allow create, update: if isValidId(roomId) && isValidId(userId)
+          && isSelf(userId)
+          && canAccessRoom(roomId)
+          && isValidTypingIndicator(incoming())
+          && incoming().uid == userId;
+        allow delete: if isValidId(roomId) && isValidId(userId) && isSelf(userId);
+      }
+    }
+
+    match /game_communities/{gameId} {
+      allow get: if isValidId(gameId) && isActiveMember();
+      allow list: if isSignedIn() && resource.data.classId == '6A';
+      allow create, update: if isValidId(gameId)
+        && isAdminOrOwner()
+        && isValidGameCommunity(incoming())
+        && incoming().gameId == gameId;
+      allow delete: if false;
+
+      match /members/{userId} {
+        allow get: if isValidId(gameId) && isValidId(userId) && isActiveMember();
+        allow list: if isValidId(gameId) && isActiveMember();
+        allow create: if isValidId(gameId) && isValidId(userId)
+          && isSelf(userId)
+          && isActiveMember()
+          && isValidGameMembership(incoming())
+          && incoming().uid == userId
+          && incoming().gameId == gameId
+          && incoming().joinedAt == request.time;
+        allow update: if isValidId(gameId) && isValidId(userId)
+          && isSelf(userId)
+          && isActiveMember()
+          && isValidGameMembership(incoming())
+          && incoming().uid == existing().uid
+          && incoming().gameId == existing().gameId
+          && incoming().joinedAt == existing().joinedAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'photoURL', 'role', 'inGameName', 'inGameId', 'lfgStatus', 'lfgNote', 'updatedAt']);
+        allow delete: if isValidId(gameId) && isValidId(userId) && (isSelf(userId) || isAdminOrOwner());
+      }
+
+      match /posts/{postId} {
+        allow get: if isValidId(gameId) && isValidId(postId) && isActiveMember();
+        allow list: if isValidId(gameId) && isActiveMember();
+        allow create: if isValidId(gameId) && isValidId(postId)
+          && isAdminOrOwner()
+          && isValidGamePost(incoming())
+          && incoming().gameId == gameId
+          && incoming().authorId == request.auth.uid
+          && incoming().createdAt == request.time;
+        allow update: if isValidId(gameId) && isValidId(postId)
+          && isAdminOrOwner()
+          && isValidGamePost(incoming())
+          && incoming().authorId == existing().authorId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['type', 'title', 'content', 'pinned', 'updatedAt']);
+        allow delete: if isValidId(gameId) && isValidId(postId) && isAdminOrOwner();
+      }
+    }
+
+    match /user_reports/{reportId} {
+      allow get: if isValidId(reportId) && isActiveMember() && (existing().reporterId == request.auth.uid || isAdminOrOwner());
+      allow list: if isSignedIn() && (resource.data.reporterId == request.auth.uid || isAdminOrOwner());
+      allow create: if isValidId(reportId)
+        && isActiveMember()
+        && isValidUserReport(incoming())
+        && incoming().reporterId == request.auth.uid
+        && incoming().status == 'menunggu'
+        && incoming().resolutionNote == ''
+        && incoming().resolvedBy == ''
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(reportId)
+        && isAdminOrOwner()
+        && isValidUserReport(incoming())
+        && incoming().reporterId == existing().reporterId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolutionNote', 'resolvedBy', 'updatedAt']);
+      allow delete: if isValidId(reportId) && isOwner();
     }
 
     match /admin_messages/{msgId} {

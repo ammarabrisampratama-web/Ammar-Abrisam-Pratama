@@ -3,15 +3,19 @@ export type AccountStatus = 'aktif' | 'nonaktif';
 
 export type NavTab =
   | 'beranda'
+  | 'chat'
+  | 'grup-kelas'
+  | 'game-center'
   | 'jadwal'
   | 'tugas'
   | 'pengumuman'
   | 'agenda'
   | 'kas'
-  | 'chat'
+  | 'piket'
+  | 'profil'
+  | 'pengaturan'
   | 'pesan-admin'
   | 'c6a-ai'
-  | 'profil'
   | 'bantuan'
   | 'owner-panel';
 
@@ -27,7 +31,29 @@ export type TreasuryCategory = 'Iuran Kas' | 'Donasi' | 'Perlengkapan' | 'Kegiat
 export type TreasuryPaymentStatus = 'lunas' | 'belum' | 'operasional';
 export type AdminMessageCategory = 'Izin' | 'Laporan' | 'Saran' | 'Pertanyaan';
 export type AdminMessageStatus = 'menunggu' | 'dibaca' | 'selesai';
-export type NotificationType = 'pengumuman' | 'tugas' | 'jadwal' | 'agenda' | 'pesan-admin' | 'info';
+export type NotificationType =
+  | 'pengumuman'
+  | 'tugas'
+  | 'jadwal'
+  | 'agenda'
+  | 'pesan-admin'
+  | 'game'
+  | 'chat'
+  | 'info';
+
+export type GameId = 'ff' | 'mlbb' | 'roblox' | 'fc-mobile';
+export type LfgStatus = 'offline' | 'siap-mabar' | 'dalam-game' | 'santai';
+export type ChatRoomType = 'class' | 'group' | 'game' | 'dm';
+export type ChatMessageType = 'text' | 'image' | 'video' | 'audio';
+export type ReportCategory = 'spam' | 'penipuan' | 'perundungan' | 'info-pribadi' | 'lainnya';
+export type ReportStatus = 'menunggu' | 'ditindak' | 'diabaikan';
+
+export interface GameIdMap {
+  ff?: string;
+  mlbb?: string;
+  roblox?: string;
+  fcMobile?: string;
+}
 
 export interface UserPublic {
   uid: string;
@@ -40,6 +66,9 @@ export interface UserPublic {
   classId: '6A';
   lastLoginAt: unknown;
   updatedAt: unknown;
+  bio?: string;
+  gameIds?: GameIdMap;
+  hideOnlineStatus?: boolean;
 }
 
 export interface UserPrivate {
@@ -47,6 +76,19 @@ export interface UserPrivate {
   email: string;
   createdAt: unknown;
   lastLoginAt: unknown;
+}
+
+export interface UserPresence {
+  uid: string;
+  isOnline: boolean;
+  hideOnlineStatus: boolean;
+  lastSeenAt: unknown;
+}
+
+export interface BlockedUser {
+  targetUid: string;
+  targetName: string;
+  blockedAt: unknown;
 }
 
 export interface TaskProgress {
@@ -120,6 +162,18 @@ export interface ScheduleItem {
   updatedAt: unknown;
 }
 
+export interface PicketScheduleItem {
+  id: string;
+  classId: '6A';
+  day: DayOfWeek;
+  students: string[];
+  tasks: string[];
+  coordinator: string;
+  note: string;
+  updatedById: string;
+  updatedAt: unknown;
+}
+
 export interface AgendaItem {
   id: string;
   classId: '6A';
@@ -160,6 +214,125 @@ export interface ChatMessage {
   senderRole: UserRole;
   text: string;
   createdAt: unknown;
+}
+
+export interface ChatReplyRef {
+  id: string;
+  senderName: string;
+  text: string;
+  messageType: ChatMessageType;
+}
+
+export interface RoomChatMessage {
+  id: string;
+  roomId: string;
+  classId: '6A';
+  senderId: string;
+  senderName: string;
+  senderRole: UserRole;
+  senderPhoto: string;
+  messageType: ChatMessageType;
+  text: string;
+  mediaUrls: string[];
+  mediaNames: string[];
+  mediaDurationSec: number;
+  replyTo: ChatReplyRef | null;
+  forwardedFrom: string;
+  reactions: Record<string, string[]>;
+  readBy: string[];
+  deleted: boolean;
+  moderatedBy: string;
+  editedAt: unknown;
+  createdAt: unknown;
+}
+
+export interface ChatRoom {
+  id: string;
+  roomId: string;
+  classId: '6A';
+  type: ChatRoomType;
+  name: string;
+  description: string;
+  gameId: GameId | '';
+  participantIds: string[];
+  pinnedMessageId: string;
+  pinnedText: string;
+  pinnedByName: string;
+  lastMessageText: string;
+  lastMessageSenderId: string;
+  lastMessageAt: unknown;
+  createdBy: string;
+  updatedAt: unknown;
+}
+
+export interface TypingIndicator {
+  uid: string;
+  displayName: string;
+  updatedAt: unknown;
+}
+
+export interface GameCommunityMeta {
+  id: string;
+  gameId: GameId;
+  classId: '6A';
+  name: string;
+  shortName: string;
+  genre: string;
+  description: string;
+  rules: string;
+  bannerUrl: string;
+  accentColor: string;
+  updatedAt: unknown;
+}
+
+export interface GameMembership {
+  uid: string;
+  gameId: GameId;
+  classId: '6A';
+  displayName: string;
+  nickname: string;
+  photoURL: string;
+  role: UserRole;
+  inGameName: string;
+  inGameId: string;
+  lfgStatus: LfgStatus;
+  lfgNote: string;
+  joinedAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface GamePost {
+  id: string;
+  gameId: GameId;
+  classId: '6A';
+  type: 'update' | 'pengumuman';
+  title: string;
+  content: string;
+  pinned: boolean;
+  authorId: string;
+  authorName: string;
+  authorRole: UserRole;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface UserReport {
+  id: string;
+  classId: '6A';
+  reporterId: string;
+  reporterName: string;
+  targetUid: string;
+  targetName: string;
+  roomId: string;
+  messageId: string;
+  messageExcerpt: string;
+  category: ReportCategory;
+  reason: string;
+  status: ReportStatus;
+  resolutionNote: string;
+  resolvedBy: string;
+  createdAt: unknown;
+  updatedAt: unknown;
 }
 
 export interface AdminMessage {
@@ -213,6 +386,11 @@ export interface ClassSettings {
   allowStudentCreateAgenda: boolean;
   allowAdminManageTreasury: boolean;
   allowAdminManageSchedule: boolean;
+  whatsappGroupUrl?: string;
+  allowGameCenter?: boolean;
+  allowVoiceNotes?: boolean;
+  allowMediaUpload?: boolean;
+  allowPrivateChat?: boolean;
   updatedAt: unknown;
 }
 
@@ -225,7 +403,7 @@ export interface ClientErrorLog {
 
 export interface GlobalSearchResult {
   id: string;
-  section: 'Tugas' | 'Pengumuman' | 'Agenda' | 'Jadwal' | 'Pesan Admin' | 'Chat';
+  section: 'Tugas' | 'Pengumuman' | 'Agenda' | 'Jadwal' | 'Pesan Admin' | 'Chat' | 'Game Center' | 'Jadwal Piket';
   title: string;
   subtitle: string;
   tab: NavTab;

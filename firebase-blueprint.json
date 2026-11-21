@@ -8,13 +8,16 @@
         "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
         "displayName": { "type": "string", "minLength": 2, "maxLength": 80 },
         "nickname": { "type": "string", "minLength": 1, "maxLength": 40 },
-        "photoURL": { "type": "string", "maxLength": 500 },
+        "photoURL": { "type": "string", "maxLength": 1000 },
         "absenNumber": { "type": "integer" },
         "role": { "type": "string", "enum": ["owner", "admin", "siswa"] },
         "status": { "type": "string", "enum": ["aktif", "nonaktif"] },
         "classId": { "type": "string", "enum": ["6A"] },
         "lastLoginAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" }
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "bio": { "type": "string", "maxLength": 200 },
+        "gameIds": { "type": "object" },
+        "hideOnlineStatus": { "type": "boolean" }
       },
       "required": ["uid", "displayName", "nickname", "photoURL", "absenNumber", "role", "status", "classId", "lastLoginAt", "updatedAt"]
     },
@@ -29,6 +32,29 @@
         "lastLoginAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "createdAt", "lastLoginAt"]
+    },
+    "UserPresence": {
+      "title": "UserPresence",
+      "description": "Real-time online status and last seen indicator respecting privacy toggle.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "isOnline": { "type": "boolean" },
+        "hideOnlineStatus": { "type": "boolean" },
+        "lastSeenAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "isOnline", "hideOnlineStatus", "lastSeenAt"]
+    },
+    "BlockedUser": {
+      "title": "BlockedUser",
+      "description": "Personal block list entry under users_private/{uid}/blocked_users.",
+      "type": "object",
+      "properties": {
+        "targetUid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "targetName": { "type": "string", "maxLength": 80 },
+        "blockedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["targetUid", "targetName", "blockedAt"]
     },
     "TaskProgress": {
       "title": "TaskProgress",
@@ -127,6 +153,22 @@
       },
       "required": ["classId", "day", "order", "startTime", "endTime", "subject", "teacher", "room", "authorId", "updatedAt"]
     },
+    "PicketScheduleItem": {
+      "title": "PicketScheduleItem",
+      "description": "Daily classroom cleaning & duty schedule (Senin-Sabtu).",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "day": { "type": "string", "enum": ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"] },
+        "students": { "type": "array" },
+        "tasks": { "type": "array" },
+        "coordinator": { "type": "string", "maxLength": 80 },
+        "note": { "type": "string", "maxLength": 200 },
+        "updatedById": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "day", "students", "tasks", "coordinator", "note", "updatedById", "updatedAt"]
+    },
     "AgendaItem": {
       "title": "AgendaItem",
       "description": "Upcoming or completed class event or agenda item.",
@@ -169,7 +211,7 @@
     },
     "ChatMessage": {
       "title": "ChatMessage",
-      "description": "Real-time class group chat message.",
+      "description": "Legacy real-time class group chat message.",
       "type": "object",
       "properties": {
         "classId": { "type": "string", "enum": ["6A"] },
@@ -180,6 +222,148 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["classId", "senderId", "senderName", "senderRole", "text", "createdAt"]
+    },
+    "ChatRoom": {
+      "title": "ChatRoom",
+      "description": "Chat room metadata for class group, custom groups, game rooms, and 1-on-1 DMs.",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "classId": { "type": "string", "enum": ["6A"] },
+        "type": { "type": "string", "enum": ["class", "group", "game", "dm"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 240 },
+        "gameId": { "type": "string", "maxLength": 20 },
+        "participantIds": { "type": "array" },
+        "pinnedMessageId": { "type": "string", "maxLength": 128 },
+        "pinnedText": { "type": "string", "maxLength": 300 },
+        "pinnedByName": { "type": "string", "maxLength": 80 },
+        "lastMessageText": { "type": "string", "maxLength": 240 },
+        "lastMessageSenderId": { "type": "string", "maxLength": 128 },
+        "lastMessageAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roomId", "classId", "type", "name", "description", "gameId", "participantIds", "pinnedMessageId", "pinnedText", "pinnedByName", "lastMessageText", "lastMessageSenderId", "lastMessageAt", "createdBy", "updatedAt"]
+    },
+    "RoomChatMessage": {
+      "title": "RoomChatMessage",
+      "description": "WhatsApp-style rich chat message supporting text, images, video, audio voice notes, replies, edits, reactions, and read receipts.",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "classId": { "type": "string", "enum": ["6A"] },
+        "senderId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "senderName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "senderRole": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "senderPhoto": { "type": "string", "maxLength": 1000 },
+        "messageType": { "type": "string", "enum": ["text", "image", "video", "audio"] },
+        "text": { "type": "string", "maxLength": 1500 },
+        "mediaUrls": { "type": "array" },
+        "mediaNames": { "type": "array" },
+        "mediaDurationSec": { "type": "number" },
+        "replyTo": { "type": ["object", "null"] },
+        "forwardedFrom": { "type": "string", "maxLength": 100 },
+        "reactions": { "type": "object" },
+        "readBy": { "type": "array" },
+        "deleted": { "type": "boolean" },
+        "moderatedBy": { "type": "string", "maxLength": 80 },
+        "editedAt": { "type": ["string", "null"], "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roomId", "classId", "senderId", "senderName", "senderRole", "senderPhoto", "messageType", "text", "mediaUrls", "mediaNames", "mediaDurationSec", "replyTo", "forwardedFrom", "reactions", "readBy", "deleted", "moderatedBy", "editedAt", "createdAt"]
+    },
+    "TypingIndicator": {
+      "title": "TypingIndicator",
+      "description": "Ephemeral typing indicator per user in a chat room.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "updatedAt"]
+    },
+    "GameCommunityMeta": {
+      "title": "GameCommunityMeta",
+      "description": "Metadata and rules for a Kelas 6A game community.",
+      "type": "object",
+      "properties": {
+        "gameId": { "type": "string", "enum": ["ff", "mlbb", "roblox", "fc-mobile"] },
+        "classId": { "type": "string", "enum": ["6A"] },
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "shortName": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "genre": { "type": "string", "maxLength": 60 },
+        "description": { "type": "string", "maxLength": 500 },
+        "rules": { "type": "string", "maxLength": 500 },
+        "bannerUrl": { "type": "string", "maxLength": 500 },
+        "accentColor": { "type": "string", "maxLength": 20 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["gameId", "classId", "name", "shortName", "genre", "description", "rules", "bannerUrl", "accentColor", "updatedAt"]
+    },
+    "GameMembership": {
+      "title": "GameMembership",
+      "description": "Member entry in a Game Center community with optional ID and LFG status.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "gameId": { "type": "string", "enum": ["ff", "mlbb", "roblox", "fc-mobile"] },
+        "classId": { "type": "string", "enum": ["6A"] },
+        "displayName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "nickname": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "photoURL": { "type": "string", "maxLength": 1000 },
+        "role": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "inGameName": { "type": "string", "maxLength": 50 },
+        "inGameId": { "type": "string", "maxLength": 50 },
+        "lfgStatus": { "type": "string", "enum": ["offline", "siap-mabar", "dalam-game", "santai"] },
+        "lfgNote": { "type": "string", "maxLength": 120 },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "gameId", "classId", "displayName", "nickname", "photoURL", "role", "inGameName", "inGameId", "lfgStatus", "lfgNote", "joinedAt", "updatedAt"]
+    },
+    "GamePost": {
+      "title": "GamePost",
+      "description": "Update or announcement inside a Game Center community.",
+      "type": "object",
+      "properties": {
+        "gameId": { "type": "string", "enum": ["ff", "mlbb", "roblox", "fc-mobile"] },
+        "classId": { "type": "string", "enum": ["6A"] },
+        "type": { "type": "string", "enum": ["update", "pengumuman"] },
+        "title": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "content": { "type": "string", "minLength": 3, "maxLength": 1500 },
+        "pinned": { "type": "boolean" },
+        "authorId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "authorRole": { "type": "string", "enum": ["owner", "admin", "siswa"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["gameId", "classId", "type", "title", "content", "pinned", "authorId", "authorName", "authorRole", "createdAt", "updatedAt"]
+    },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "Moderation report filed by a student against spam, scam, bullying, or PII leak.",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string", "enum": ["6A"] },
+        "reporterId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "reporterName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "targetUid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "targetName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "roomId": { "type": "string", "maxLength": 128 },
+        "messageId": { "type": "string", "maxLength": 128 },
+        "messageExcerpt": { "type": "string", "maxLength": 300 },
+        "category": { "type": "string", "enum": ["spam", "penipuan", "perundungan", "info-pribadi", "lainnya"] },
+        "reason": { "type": "string", "minLength": 5, "maxLength": 500 },
+        "status": { "type": "string", "enum": ["menunggu", "ditindak", "diabaikan"] },
+        "resolutionNote": { "type": "string", "maxLength": 300 },
+        "resolvedBy": { "type": "string", "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["classId", "reporterId", "reporterName", "targetUid", "targetName", "roomId", "messageId", "messageExcerpt", "category", "reason", "status", "resolutionNote", "resolvedBy", "createdAt", "updatedAt"]
     },
     "AdminMessage": {
       "title": "AdminMessage",
@@ -202,11 +386,11 @@
     },
     "NotificationItem": {
       "title": "NotificationItem",
-      "description": "Real-time notification event for announcements, tasks, schedules, agendas, and admin replies.",
+      "description": "Real-time notification event for announcements, tasks, schedules, agendas, games, and chats.",
       "type": "object",
       "properties": {
         "classId": { "type": "string", "enum": ["6A"] },
-        "type": { "type": "string", "enum": ["pengumuman", "tugas", "jadwal", "agenda", "pesan-admin", "info"] },
+        "type": { "type": "string", "enum": ["pengumuman", "tugas", "jadwal", "agenda", "pesan-admin", "game", "chat", "info"] },
         "title": { "type": "string", "minLength": 2, "maxLength": 120 },
         "body": { "type": "string", "minLength": 1, "maxLength": 300 },
         "targetTab": { "type": "string", "maxLength": 40 },
@@ -248,6 +432,11 @@
         "allowStudentCreateAgenda": { "type": "boolean" },
         "allowAdminManageTreasury": { "type": "boolean" },
         "allowAdminManageSchedule": { "type": "boolean" },
+        "whatsappGroupUrl": { "type": "string", "maxLength": 300 },
+        "allowGameCenter": { "type": "boolean" },
+        "allowVoiceNotes": { "type": "boolean" },
+        "allowMediaUpload": { "type": "boolean" },
+        "allowPrivateChat": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["classId", "homeroomTeacher", "academicYear", "motto", "adminContactNote", "weeklyKasTarget", "allowStudentCreateTask", "allowStudentCreateAgenda", "allowAdminManageTreasury", "allowAdminManageSchedule", "updatedAt"]
@@ -256,7 +445,7 @@
   "firestore": {
     "/users_public/{userId}": {
       "schema": { "$ref": "#/entities/UserPublic" },
-      "description": "Public profile for Kelas 6A members (role, nickname, status & absen)."
+      "description": "Public profile for Kelas 6A members (role, nickname, status, absen & optional game IDs)."
     },
     "/users_private/{userId}": {
       "schema": { "$ref": "#/entities/UserPrivate" },
@@ -269,6 +458,14 @@
     "/users_private/{userId}/notification_state/{docId}": {
       "schema": { "$ref": "#/entities/NotificationState" },
       "description": "Per-user notification read state."
+    },
+    "/users_private/{userId}/blocked_users/{targetUid}": {
+      "schema": { "$ref": "#/entities/BlockedUser" },
+      "description": "Per-user list of blocked classmates."
+    },
+    "/presence/{userId}": {
+      "schema": { "$ref": "#/entities/UserPresence" },
+      "description": "Real-time user online presence and last seen timestamp."
     },
     "/login_history/{logId}": {
       "schema": { "$ref": "#/entities/LoginHistory" },
@@ -286,6 +483,10 @@
       "schema": { "$ref": "#/entities/ScheduleItem" },
       "description": "Weekly 6-day class lesson schedules."
     },
+    "/picket_schedules/{picketId}": {
+      "schema": { "$ref": "#/entities/PicketScheduleItem" },
+      "description": "Daily Senin-Sabtu classroom duty (Jadwal Piket) schedules."
+    },
     "/agendas/{agendaId}": {
       "schema": { "$ref": "#/entities/AgendaItem" },
       "description": "Upcoming and completed class agendas."
@@ -296,7 +497,35 @@
     },
     "/chat_messages/{messageId}": {
       "schema": { "$ref": "#/entities/ChatMessage" },
-      "description": "Real-time class group chat messages."
+      "description": "Legacy real-time class group chat messages."
+    },
+    "/chat_rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/ChatRoom" },
+      "description": "Chat room metadata (class group, custom groups, game rooms, and 1-on-1 DMs)."
+    },
+    "/chat_rooms/{roomId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/RoomChatMessage" },
+      "description": "Rich WhatsApp-style messages per room (text, images, video, voice notes, replies, reactions)."
+    },
+    "/chat_rooms/{roomId}/typing/{userId}": {
+      "schema": { "$ref": "#/entities/TypingIndicator" },
+      "description": "Real-time typing indicator per room."
+    },
+    "/game_communities/{gameId}": {
+      "schema": { "$ref": "#/entities/GameCommunityMeta" },
+      "description": "Game Center community metadata."
+    },
+    "/game_communities/{gameId}/members/{userId}": {
+      "schema": { "$ref": "#/entities/GameMembership" },
+      "description": "Game community members, optional in-game IDs, and LFG status."
+    },
+    "/game_communities/{gameId}/posts/{postId}": {
+      "schema": { "$ref": "#/entities/GamePost" },
+      "description": "Game updates and announcements published by Admin/Owner."
+    },
+    "/user_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/UserReport" },
+      "description": "User moderation reports for spam, phishing, bullying, and privacy violations."
     },
     "/admin_messages/{msgId}": {
       "schema": { "$ref": "#/entities/AdminMessage" },

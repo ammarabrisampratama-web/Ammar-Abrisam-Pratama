@@ -11,14 +11,18 @@ import {
   Download,
   Edit3,
   FileSearch,
+  Flag,
   History,
   Inbox,
   LayoutDashboard,
   Megaphone,
+  MessageSquare,
+  Plus,
   Save,
   Search,
   Settings,
   Shield,
+  ShieldAlert,
   Sliders,
   Sparkles,
   Trash2,
@@ -31,13 +35,16 @@ import {
 import firebaseConfig from '../../../firebase-applet-config.json';
 import {
   checkFirebaseConnectionLatency,
+  createCustomGroupRoom,
   createNotificationEvent,
   deleteAgendaItem,
   deleteAnnouncement,
   deleteAssignment,
+  deleteCustomGroupRoom,
   deleteScheduleItem,
   deleteTreasuryEntry,
   replyAdminMessage,
+  resolveUserReport,
   saveClassSettings,
   updateAnnouncement,
   updateMemberRoleAndStatus,
@@ -48,6 +55,7 @@ import type {
   AgendaItem,
   Announcement,
   Assignment,
+  ChatRoom,
   ClassSettings,
   ClientErrorLog,
   LoginHistoryEntry,
@@ -56,7 +64,9 @@ import type {
   ScheduleItem,
   TreasuryEntry,
   UserPublic,
+  UserReport,
 } from '../../types';
+import { OFFICIAL_WHATSAPP_GROUP_URL } from '../../utils/mediaUtils';
 import {
   buildTreasuryCsv,
   calculateTreasurySummary,
@@ -86,7 +96,9 @@ type OwnerSectionId =
   | 'koneksi-firebase'
   | 'log-kesalahan'
   | 'backup-ekspor'
-  | 'audit-perubahan';
+  | 'audit-perubahan'
+  | 'moderasi-laporan'
+  | 'grup-game-chat';
 
 const OWNER_SECTIONS: Array<{ id: OwnerSectionId; num: number; label: string; icon: typeof Shield }> = [
   { id: 'dashboard', num: 1, label: 'Dashboard Owner', icon: LayoutDashboard },
@@ -107,6 +119,8 @@ const OWNER_SECTIONS: Array<{ id: OwnerSectionId; num: number; label: string; ic
   { id: 'log-kesalahan', num: 16, label: 'Log Kesalahan', icon: AlertTriangle },
   { id: 'backup-ekspor', num: 17, label: 'Backup & Ekspor Data', icon: Database },
   { id: 'audit-perubahan', num: 18, label: 'Audit Perubahan Data', icon: FileSearch },
+  { id: 'moderasi-laporan', num: 19, label: 'Moderasi & Laporan Chat', icon: ShieldAlert },
+  { id: 'grup-game-chat', num: 20, label: 'Grup Chat & Game Center', icon: MessageSquare },
 ];
 
 interface OwnerPanelViewProps {
@@ -123,8 +137,11 @@ interface OwnerPanelViewProps {
   adminMessages: AdminMessage[];
   notifications: NotificationItem[];
   clientErrors: ClientErrorLog[];
+  userReports?: UserReport[];
+  chatRooms?: ChatRoom[];
   onClearClientErrors: () => void;
   onNavigateTab: (tab: NavTab) => void;
+  onOpenChatRoom?: (roomId: string) => void;
   onSyncOfficialSchedule: () => Promise<void>;
 }
 
@@ -142,8 +159,11 @@ export function OwnerPanelView({
   adminMessages,
   notifications,
   clientErrors,
+  userReports = [],
+  chatRooms = [],
   onClearClientErrors,
   onNavigateTab,
+  onOpenChatRoom,
   onSyncOfficialSchedule,
 }: OwnerPanelViewProps) {
   const [section, setSection] = useState<OwnerSectionId>('dashboard');
@@ -161,11 +181,23 @@ export function OwnerPanelView({
   const [motto, setMotto] = useState(settings.motto);
   const [adminContactNote, setAdminContactNote] = useState(settings.adminContactNote);
   const [weeklyKasTarget, setWeeklyKasTarget] = useState(String(settings.weeklyKasTarget));
+  const [whatsappGroupUrl, setWhatsappGroupUrl] = useState(
+    settings.whatsappGroupUrl || OFFICIAL_WHATSAPP_GROUP_URL
+  );
   const [allowStudentCreateTask, setAllowStudentCreateTask] = useState(settings.allowStudentCreateTask);
   const [allowStudentCreateAgenda, setAllowStudentCreateAgenda] = useState(settings.allowStudentCreateAgenda);
   const [allowAdminManageTreasury, setAllowAdminManageTreasury] = useState(settings.allowAdminManageTreasury);
   const [allowAdminManageSchedule, setAllowAdminManageSchedule] = useState(settings.allowAdminManageSchedule);
+  const [allowGameCenter, setAllowGameCenter] = useState(settings.allowGameCenter ?? true);
+  const [allowVoiceNotes, setAllowVoiceNotes] = useState(settings.allowVoiceNotes ?? true);
+  const [allowMediaUpload, setAllowMediaUpload] = useState(settings.allowMediaUpload ?? true);
+  const [allowPrivateChat, setAllowPrivateChat] = useState(settings.allowPrivateChat ?? true);
   const [savingSettings, setSavingSettings] = useState(false);
+
+  const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({});
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupDesc, setNewGroupDesc] = useState('');
+  const [creatingGroup, setCreatingGroup] = useState(false);
 
   const [notifTitle, setNotifTitle] = useState('');
   const [notifBody, setNotifBody] = useState('');
@@ -253,6 +285,11 @@ export function OwnerPanelView({
         allowStudentCreateAgenda,
         allowAdminManageTreasury,
         allowAdminManageSchedule,
+        whatsappGroupUrl: whatsappGroupUrl.trim() || OFFICIAL_WHATSAPP_GROUP_URL,
+        allowGameCenter,
+        allowVoiceNotes,
+        allowMediaUpload,
+        allowPrivateChat,
       });
       setFeedback('Pengaturan kelas & aplikasi berhasil disimpan ke Firestore.');
     } catch (err) {
@@ -1179,6 +1216,18 @@ export function OwnerPanelView({
                   />
                 </div>
               </div>
+              <div>
+                <label className="block text-xs text-[#2F4F3C] font-medium mb-1">
+                  Tautan Undangan Resmi Grup WhatsApp Kelas 6A
+                </label>
+                <input
+                  type="url"
+                  value={whatsappGroupUrl}
+                  onChange={(e) => setWhatsappGroupUrl(e.target.value)}
+                  placeholder="https://chat.whatsapp.com/..."
+                  className="w-full min-h-[42px] px-3.5 rounded-xl bg-white border border-[#B9D8C2] text-xs sm:text-sm text-[#0B2416] font-mono-num"
+                />
+              </div>
               <div className="flex justify-end">
                 <button
                   type="submit"
@@ -1245,6 +1294,58 @@ export function OwnerPanelView({
                     type="checkbox"
                     checked={allowAdminManageTreasury}
                     onChange={(e) => setAllowAdminManageTreasury(e.target.checked)}
+                    className="w-4 h-4 accent-[#0B6B3A]"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between p-3.5 rounded-xl bg-[#F0F7F2] border border-[#D3E6D8] cursor-pointer">
+                  <div>
+                    <p className="font-semibold text-[#0B2416]">Aktifkan Fitur Game Center &amp; Komunitas Mabar</p>
+                    <p className="text-xs text-[#52705E]">Menampilkan halaman Game Center (FF, MLBB, Roblox, FC Mobile) untuk siswa.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={allowGameCenter}
+                    onChange={(e) => setAllowGameCenter(e.target.checked)}
+                    className="w-4 h-4 accent-[#0B6B3A]"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between p-3.5 rounded-xl bg-[#F0F7F2] border border-[#D3E6D8] cursor-pointer">
+                  <div>
+                    <p className="font-semibold text-[#0B2416]">Izinkan Chat Pribadi Antarsiswa (DM)</p>
+                    <p className="text-xs text-[#52705E]">Siswa dapat mengirim pesan 1-on-1 terpantau di portal kelas.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={allowPrivateChat}
+                    onChange={(e) => setAllowPrivateChat(e.target.checked)}
+                    className="w-4 h-4 accent-[#0B6B3A]"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between p-3.5 rounded-xl bg-[#F0F7F2] border border-[#D3E6D8] cursor-pointer">
+                  <div>
+                    <p className="font-semibold text-[#0B2416]">Izinkan Rekam &amp; Kirim Pesan Suara (Mikrofon)</p>
+                    <p className="text-xs text-[#52705E]">Mengaktifkan tombol mikrofon di kolom chat real-time.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={allowVoiceNotes}
+                    onChange={(e) => setAllowVoiceNotes(e.target.checked)}
+                    className="w-4 h-4 accent-[#0B6B3A]"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between p-3.5 rounded-xl bg-[#F0F7F2] border border-[#D3E6D8] cursor-pointer">
+                  <div>
+                    <p className="font-semibold text-[#0B2416]">Izinkan Upload Foto, Kamera, &amp; Video di Chat</p>
+                    <p className="text-xs text-[#52705E]">Siswa dapat mengirim foto terkompresi dan video maks. 15 MB di ruang chat.</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={allowMediaUpload}
+                    onChange={(e) => setAllowMediaUpload(e.target.checked)}
                     className="w-4 h-4 accent-[#0B6B3A]"
                   />
                 </label>
@@ -1418,6 +1519,272 @@ export function OwnerPanelView({
                   ))}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* 19. Moderasi & Laporan Chat / Game */}
+          {section === 'moderasi-laporan' && (
+            <div className="bg-white border border-[#D3E6D8] rounded-2xl overflow-hidden">
+              <div className="p-4 sm:p-5 bg-[#F0F7F2] border-b border-[#E2EFE6] flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-base font-semibold text-[#0B2416]">
+                    Moderasi &amp; Laporan Pelanggaran ({userReports.length})
+                  </h3>
+                  <p className="text-xs text-[#52705E]">
+                    Tinjau laporan spam, penipuan, perundungan, atau penyebaran data pribadi dari Chat &amp; Game Center.
+                  </p>
+                </div>
+                <span className="font-mono-num text-xs font-bold text-rose-700">
+                  {userReports.filter((r) => r.status === 'menunggu').length} menunggu
+                </span>
+              </div>
+
+              {userReports.length === 0 ? (
+                <p className="p-8 text-center text-xs text-[#52705E]">
+                  Belum ada laporan moderasi dari anggota kelas.
+                </p>
+              ) : (
+                <div className="divide-y divide-[#E6F2EA] max-h-[32rem] overflow-y-auto">
+                  {userReports.map((rep) => {
+                    const targetMember = members.find((m) => m.uid === rep.targetUid);
+                    const noteVal = resolutionNotes[rep.id] ?? rep.resolutionNote ?? '';
+                    return (
+                      <div key={rep.id} className="p-4 space-y-2.5 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <Flag className="w-3.5 h-3.5 text-rose-600" />
+                            <span className="font-bold text-[#0B2416]">
+                              Terlapor: {rep.targetName}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 font-semibold text-[10px]">
+                              {rep.category}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md font-semibold text-[10px] ${
+                                rep.status === 'menunggu'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : rep.status === 'ditindak'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {rep.status}
+                            </span>
+                          </div>
+                          <span className="font-mono-num text-[#52705E]">
+                            Pelapor: {rep.reporterName} · {formatTimestampId(rep.createdAt)}
+                          </span>
+                        </div>
+
+                        <p className="text-[#2F4F3C]">{rep.reason}</p>
+                        {rep.messageExcerpt && (
+                          <p className="p-2 rounded-lg bg-[#F8FCF9] border border-[#D3E6D8] italic text-[#52705E]">
+                            Kutipan pesan: &ldquo;{rep.messageExcerpt}&rdquo;
+                          </p>
+                        )}
+
+                        {rep.status === 'menunggu' ? (
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <input
+                              type="text"
+                              value={noteVal}
+                              onChange={(e) =>
+                                setResolutionNotes((prev) => ({
+                                  ...prev,
+                                  [rep.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="Catatan tindakan (opsional)"
+                              className="flex-1 min-w-[180px] min-h-[34px] px-3 rounded-lg border border-[#B9D8C2] text-xs"
+                            />
+                            <button
+                              type="button"
+                              disabled={busyId === rep.id}
+                              onClick={async () => {
+                                setBusyId(rep.id);
+                                try {
+                                  await resolveUserReport(profile, rep.id, 'ditindak', noteVal);
+                                  setFeedback(`Laporan terhadap ${rep.targetName} ditandai ditindak.`);
+                                } finally {
+                                  setBusyId(null);
+                                }
+                              }}
+                              className="min-h-[34px] px-3 rounded-lg bg-[#0B6B3A] text-white font-semibold cursor-pointer"
+                            >
+                              Tandai Ditindak
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busyId === rep.id}
+                              onClick={async () => {
+                                setBusyId(rep.id);
+                                try {
+                                  await resolveUserReport(profile, rep.id, 'diabaikan', noteVal);
+                                } finally {
+                                  setBusyId(null);
+                                }
+                              }}
+                              className="min-h-[34px] px-3 rounded-lg bg-[#F0F7F2] border border-[#C6E0CE] text-[#2F4F3C] font-semibold cursor-pointer"
+                            >
+                              Abaikan
+                            </button>
+                            {targetMember && targetMember.role !== 'owner' && targetMember.status === 'aktif' && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setConfirmAction({
+                                    title: 'Nonaktifkan Akun Pelanggar?',
+                                    description: `Nonaktifkan sementara akun ${targetMember.displayName}?`,
+                                    confirmLabel: 'Nonaktifkan',
+                                    run: async () => {
+                                      await updateMemberRoleAndStatus(profile, targetMember, {
+                                        status: 'nonaktif',
+                                      });
+                                      await resolveUserReport(
+                                        profile,
+                                        rep.id,
+                                        'ditindak',
+                                        noteVal || 'Akun dinonaktifkan oleh Owner.'
+                                      );
+                                    },
+                                  })
+                                }
+                                className="min-h-[34px] px-3 rounded-lg bg-rose-600 text-white font-semibold cursor-pointer"
+                              >
+                                Nonaktifkan Akun
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          rep.resolutionNote && (
+                            <p className="text-[11px] text-[#0B6B3A]">
+                              Catatan {rep.resolvedBy}: {rep.resolutionNote}
+                            </p>
+                          )
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 20. Grup Chat & Game Center */}
+          {section === 'grup-game-chat' && (
+            <div className="space-y-4">
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  setCreatingGroup(true);
+                  setFeedback(null);
+                  try {
+                    await createCustomGroupRoom(profile, newGroupName, newGroupDesc);
+                    setNewGroupName('');
+                    setNewGroupDesc('');
+                    setFeedback('Sub-grup diskusi internal kelas berhasil dibuat.');
+                  } catch (err) {
+                    setFeedback(err instanceof Error ? err.message : 'Gagal membuat grup.');
+                  } finally {
+                    setCreatingGroup(false);
+                  }
+                }}
+                className="bg-white border border-[#D3E6D8] rounded-2xl p-5 space-y-3"
+              >
+                <h3 className="text-base font-semibold text-[#0B2416] flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-[#0B6B3A]" />
+                  <span>Buat Grup Chat Internal Kelas Baru</span>
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <input
+                    type="text"
+                    required
+                    minLength={3}
+                    maxLength={100}
+                    value={newGroupName}
+                    onChange={(e) => setNewGroupName(e.target.value)}
+                    placeholder="Nama grup diskusi"
+                    className="min-h-[42px] px-3.5 rounded-xl bg-white border border-[#B9D8C2] text-sm text-[#0B2416]"
+                  />
+                  <input
+                    type="text"
+                    maxLength={240}
+                    value={newGroupDesc}
+                    onChange={(e) => setNewGroupDesc(e.target.value)}
+                    placeholder="Deskripsi singkat grup"
+                    className="min-h-[42px] px-3.5 rounded-xl bg-white border border-[#B9D8C2] text-sm text-[#0B2416]"
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onNavigateTab('game-center')}
+                    className="min-h-[40px] px-4 rounded-xl bg-[#F0F7F2] border border-[#C6E0CE] text-xs font-semibold text-[#0B6B3A] cursor-pointer"
+                  >
+                    Buka Game Center
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={creatingGroup}
+                    className="min-h-[40px] px-4 rounded-xl bg-[#0B6B3A] hover:bg-[#09562E] text-white text-xs font-semibold cursor-pointer"
+                  >
+                    {creatingGroup ? 'Membuat...' : 'Tambah Grup'}
+                  </button>
+                </div>
+              </form>
+
+              <div className="bg-white border border-[#D3E6D8] rounded-2xl p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-[#0B2416]">
+                  Daftar Ruang Chat Aktif ({chatRooms.length})
+                </h3>
+                {chatRooms.length === 0 ? (
+                  <p className="text-xs text-[#52705E] py-4 text-center">
+                    Belum ada ruang chat kustom/tercatat di Firestore.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-[#E6F2EA] max-h-96 overflow-y-auto">
+                    {chatRooms.map((r) => (
+                      <div key={r.roomId} className="py-3 flex items-center justify-between gap-3 text-xs">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-[#0B2416] truncate">
+                            [{r.type.toUpperCase()}] {r.name}
+                          </p>
+                          <p className="text-[#52705E] truncate">{r.lastMessageText || r.description}</p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {onOpenChatRoom && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenChatRoom(r.roomId)}
+                              className="px-3 py-1.5 rounded-lg bg-[#E6F4EC] text-[#0B6B3A] font-semibold cursor-pointer"
+                            >
+                              Buka
+                            </button>
+                          )}
+                          {r.type === 'group' && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setConfirmAction({
+                                  title: 'Hapus Grup Diskusi?',
+                                  description: `Hapus grup "${r.name}"?`,
+                                  confirmLabel: 'Hapus',
+                                  run: async () => {
+                                    await deleteCustomGroupRoom(profile, r.roomId, r.name);
+                                  },
+                                })
+                              }
+                              className="p-2 text-rose-600 hover:text-rose-800 cursor-pointer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </section>

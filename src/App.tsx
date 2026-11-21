@@ -9,7 +9,7 @@ import {
   query,
   where,
 } from 'firebase/firestore';
-import { Ban, LogOut, Search } from 'lucide-react';
+import { Ban, LogOut, Moon, Search, Sun } from 'lucide-react';
 import { auth, BOOTSTRAPPED_OWNER_EMAIL, db, handleFirestoreError, OperationType } from './firebase';
 import { CrestLogo } from './components/CrestLogo';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
@@ -23,11 +23,15 @@ import { AssignmentsView } from './components/views/AssignmentsView';
 import { C6AAssistantView } from './components/views/C6AAssistantView';
 import { ChatView } from './components/views/ChatView';
 import { DashboardView } from './components/views/DashboardView';
+import { GameCenterView } from './components/views/GameCenterView';
 import { HelpCenterView } from './components/views/HelpCenterView';
 import { OwnerPanelView } from './components/views/OwnerPanelView';
+import { PicketScheduleView } from './components/views/PicketScheduleView';
 import { ProfileView } from './components/views/ProfileView';
 import { ScheduleView } from './components/views/ScheduleView';
+import { SettingsView } from './components/views/SettingsView';
 import { TreasuryView } from './components/views/TreasuryView';
+import { WhatsAppGroupView } from './components/views/WhatsAppGroupView';
 import {
   createOrUpdateUserProfile,
   fetchPublicProfile,
@@ -36,6 +40,7 @@ import {
   recordLoginAudit,
   saveReadNotifications,
   syncPrivateUserOnLogin,
+  updateUserPresence,
 } from './services/firestoreService';
 import type {
   ActivityLog,
@@ -43,18 +48,23 @@ import type {
   AgendaItem,
   Announcement,
   Assignment,
+  BlockedUser,
   ChatMessage,
+  ChatRoom,
   ClassSettings,
   ClientErrorLog,
   LoginHistoryEntry,
   NavTab,
   NotificationItem,
   NotificationState,
+  PicketScheduleItem,
   ScheduleItem,
   TaskProgress,
   TaskProgressStatus,
   TreasuryEntry,
+  UserPresence,
   UserPublic,
+  UserReport,
 } from './types';
 import {
   canAccessNavTab,
@@ -82,10 +92,28 @@ export default function App() {
   const [isInitializingSchedule, setIsInitializingSchedule] = useState(false);
 
   const [activeTab, setActiveTab] = useState<NavTab>('beranda');
+  const [selectedChatRoomId, setSelectedChatRoomId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [compactMode, setCompactMode] = useState<boolean>(
     () => typeof localStorage !== 'undefined' && localStorage.getItem('kelas6a_compact') === '1'
   );
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('kelas6a_theme') === 'dark') {
+      return 'dark';
+    }
+    return 'light';
+  });
+
+  // Apply Dark/Light theme class on <html>
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    localStorage.setItem('kelas6a_theme', theme);
+  }, [theme]);
 
   // Real-time Firestore collections
   const [settings, setSettings] = useState<ClassSettings>({
@@ -97,9 +125,15 @@ export default function App() {
   const [taskProgressMap, setTaskProgressMap] = useState<Map<string, TaskProgressStatus>>(new Map());
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
   const [schedulesLoaded, setSchedulesLoaded] = useState(false);
+  const [picketSchedules, setPicketSchedules] = useState<PicketScheduleItem[]>([]);
   const [agendas, setAgendas] = useState<AgendaItem[]>([]);
   const [treasury, setTreasury] = useState<TreasuryEntry[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [publicRooms, setPublicRooms] = useState<ChatRoom[]>([]);
+  const [dmRooms, setDmRooms] = useState<ChatRoom[]>([]);
+  const [presenceList, setPresenceList] = useState<UserPresence[]>([]);
+  const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
+  const [userReports, setUserReports] = useState<UserReport[]>([]);
   const [adminMessages, setAdminMessages] = useState<AdminMessage[]>([]);
   const [members, setMembers] = useState<UserPublic[]>([]);
   const [loginHistory, setLoginHistory] = useState<LoginHistoryEntry[]>([]);
@@ -234,6 +268,36 @@ export default function App() {
 
     return () => unsub();
   }, []);
+
+  // Real-time presence heartbeat
+  useEffect(() => {
+    if (!authReady || !firebaseUser || !profile || profile.status === 'nonaktif') return;
+    const uid = firebaseUser.uid;
+    const hide = Boolean(profile.hideOnlineStatus);
+
+    void updateUserPresence(uid, true, hide);
+
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void updateUserPresence(uid, true, hide);
+      }
+    }, 45000);
+
+    const onVisChange = () => {
+      void updateUserPresence(uid, document.visibilityState === 'visible', hide);
+    };
+    const onBeforeUnload = () => {
+      void updateUserPresence(uid, false, hide);
+    };
+
+    document.addEventListener('visibilitychange', onVisChange);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisChange);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+    };
+  }, [authReady, firebaseUser, profile?.uid, profile?.status, profile?.hideOnlineStatus]);
 
   // Real-time Firestore subscriptions (only when authenticated, profiled, and status === 'aktif')
   useEffect(() => {
@@ -376,6 +440,21 @@ export default function App() {
       )
     );
 
+    // 4b. Picket Schedules
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'picket_schedules'), where('classId', '==', CLASS_ID)),
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<PicketScheduleItem, 'id'>),
+          }));
+          setPicketSchedules(list);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'picket_schedules')
+      )
+    );
+
     // 5. Agendas
     unsubs.push(
       onSnapshot(
@@ -421,7 +500,7 @@ export default function App() {
       )
     );
 
-    // 7. Chat Messages
+    // 7. Legacy Chat Messages
     unsubs.push(
       onSnapshot(
         query(collection(db, 'chat_messages'), where('classId', '==', CLASS_ID)),
@@ -432,6 +511,61 @@ export default function App() {
           setChatMessages(list);
         },
         (error) => handleFirestoreError(error, OperationType.LIST, 'chat_messages')
+      )
+    );
+
+    // 7b. Upgraded Chat Rooms (Public/Group/Game + Own DMs)
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'chat_rooms'), where('type', 'in', ['class', 'group', 'game'])),
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<ChatRoom, 'id'>),
+          }));
+          setPublicRooms(list);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'chat_rooms_public')
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'chat_rooms'), where('participantIds', 'array-contains', uid)),
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<ChatRoom, 'id'>),
+          }));
+          setDmRooms(list);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'chat_rooms_dm')
+      )
+    );
+
+    // 7c. Presence & Blocked Users
+    unsubs.push(
+      onSnapshot(
+        collection(db, 'presence'),
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            ...(d.data() as UserPresence),
+            uid: d.id,
+          }));
+          setPresenceList(list);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'presence')
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        collection(db, 'users_private', uid, 'blocked_users'),
+        (snap) => {
+          const list = snap.docs.map((d) => d.data() as BlockedUser);
+          setBlockedUsers(list);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, `users_private/${uid}/blocked_users`)
       )
     );
 
@@ -453,6 +587,24 @@ export default function App() {
       )
     );
 
+    // 8b. Moderation User Reports
+    const reportsQuery = isStaff
+      ? query(collection(db, 'user_reports'))
+      : query(collection(db, 'user_reports'), where('reporterId', '==', uid));
+
+    unsubs.push(
+      onSnapshot(
+        reportsQuery,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => ({ id: d.id, ...(d.data() as Omit<UserReport, 'id'>) }))
+            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+          setUserReports(list);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'user_reports')
+      )
+    );
+
     // 9. Public Members
     unsubs.push(
       onSnapshot(
@@ -469,7 +621,10 @@ export default function App() {
               prev.role === selfUpdated.role &&
               prev.status === selfUpdated.status &&
               prev.displayName === selfUpdated.displayName &&
-              prev.nickname === selfUpdated.nickname
+              prev.nickname === selfUpdated.nickname &&
+              prev.photoURL === selfUpdated.photoURL &&
+              prev.bio === selfUpdated.bio &&
+              prev.hideOnlineStatus === selfUpdated.hideOnlineStatus
                 ? prev
                 : selfUpdated
             );
@@ -522,7 +677,7 @@ export default function App() {
       )
     );
 
-    // 11. Activity Logs (Owner sees all, Siswa/Admin sees own logs)
+    // 11. Activity Logs
     const activityQuery =
       profile.role === 'owner'
         ? query(collection(db, 'activity_logs'), orderBy('createdAt', 'desc'), limit(150))
@@ -571,7 +726,24 @@ export default function App() {
     return Array.from(map.values()).sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
   }, [classNotifications, privateNotifications]);
 
-  // Real-time Toast + Browser Notification trigger when new notification arrives
+  const chatRooms = useMemo(() => {
+    const map = new Map<string, ChatRoom>();
+    [...publicRooms, ...dmRooms].forEach((r) => map.set(r.roomId || r.id, { ...r, roomId: r.roomId || r.id }));
+    return Array.from(map.values());
+  }, [publicRooms, dmRooms]);
+
+  const presenceMap = useMemo(() => {
+    const map = new Map<string, UserPresence>();
+    presenceList.forEach((p) => map.set(p.uid, p));
+    return map;
+  }, [presenceList]);
+
+  const blockedUids = useMemo(
+    () => new Set(blockedUsers.map((b) => b.targetUid)),
+    [blockedUsers]
+  );
+
+  // Real-time Toast + Browser Notification trigger
   useEffect(() => {
     if (!firebaseUser || combinedNotifications.length === 0) return;
 
@@ -632,6 +804,7 @@ export default function App() {
 
   const handleLogout = async () => {
     if (firebaseUser) {
+      await updateUserPresence(firebaseUser.uid, false, Boolean(profile?.hideOnlineStatus));
       sessionStorage.removeItem(`logged_login_${firebaseUser.uid}`);
     }
     await signOut(auth);
@@ -723,15 +896,22 @@ export default function App() {
     });
   };
 
+  const handleOpenChatRoom = (roomId: string) => {
+    setSelectedChatRoomId(roomId);
+    setActiveTab('chat');
+  };
+
   if (!authReady) {
     return (
-      <div className="min-h-screen bg-[#F4F9F5] text-[#0B2416] flex flex-col items-center justify-center gap-4 p-6">
+      <div className="min-h-screen bg-[#F4F9F5] dark:bg-[#08150E] text-[#0B2416] dark:text-emerald-50 flex flex-col items-center justify-center gap-4 p-6">
         <CrestLogo size="lg" />
         <div className="text-center space-y-1">
-          <p className="text-base font-bold text-[#0B2416]">
+          <p className="text-base font-bold text-[#0B2416] dark:text-emerald-50">
             {CLASS_TITLE} · {SCHOOL_NAME}
           </p>
-          <p className="text-xs text-[#52705E]">Memulihkan sesi kelas Anda...</p>
+          <p className="text-xs text-[#52705E] dark:text-emerald-300/80">
+            Memulihkan sesi kelas Anda...
+          </p>
         </div>
       </div>
     );
@@ -753,11 +933,13 @@ export default function App() {
 
   if (profile.status === 'nonaktif') {
     return (
-      <div className="min-h-screen bg-[#F4F9F5] text-[#0B2416] flex items-center justify-center p-6">
-        <div className="max-w-md w-full bg-white border border-rose-200 rounded-2xl p-6 text-center space-y-4 shadow-sm">
+      <div className="min-h-screen bg-[#F4F9F5] dark:bg-[#08150E] text-[#0B2416] dark:text-emerald-50 flex items-center justify-center p-6">
+        <div className="max-w-md w-full bg-white dark:bg-[#0F2419] border border-rose-200 dark:border-rose-800 rounded-2xl p-6 text-center space-y-4 shadow-sm">
           <Ban className="w-10 h-10 text-rose-600 mx-auto" />
-          <h1 className="text-lg font-bold text-[#0B2416]">Akun Sedang Dinonaktifkan</h1>
-          <p className="text-xs text-[#2F4F3C] leading-relaxed">
+          <h1 className="text-lg font-bold text-[#0B2416] dark:text-emerald-50">
+            Akun Sedang Dinonaktifkan
+          </h1>
+          <p className="text-xs text-[#2F4F3C] dark:text-emerald-200 leading-relaxed">
             Akun Anda ({profile.displayName}) saat ini berstatus nonaktif oleh Owner Kelas 6A. Silakan hubungi Wali Kelas untuk mengaktifkan kembali akses portal.
           </p>
           <button
@@ -774,44 +956,58 @@ export default function App() {
   }
 
   const unreadNotificationsCount = combinedNotifications.filter((n) => !readNotifIds.has(n.id)).length;
+  const unreadChatCount = chatRooms.filter(
+    (r) => Boolean(r.lastMessageSenderId) && r.lastMessageSenderId !== profile.uid
+  ).length;
   const activeNavItem = NAV_ITEMS.find((item) => item.id === activeTab);
   const currentNavLabel = activeNavItem ? getNavItemLabel(activeNavItem, profile.role) : 'Beranda';
   const myActivities = activityLogs.filter((l) => l.actorId === profile.uid);
 
   return (
-    <div className="min-h-screen bg-[#F4F9F5] text-[#0B2416] flex">
+    <div className="min-h-screen bg-[#F4F9F5] dark:bg-[#08150E] text-[#0B2416] dark:text-emerald-50 flex">
       <DesktopSidebar
         profile={profile}
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         onLogout={handleLogout}
         unreadNotificationsCount={unreadNotificationsCount}
+        unreadChatCount={unreadChatCount}
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
-        <header className="sticky top-0 z-30 h-[56px] lg:h-16 bg-white/95 backdrop-blur-md border-b border-[#D3E6D8] px-4 sm:px-6 flex items-center justify-between gap-3">
+        <header className="sticky top-0 z-30 h-[56px] lg:h-16 bg-white/95 dark:bg-[#0B1B12]/95 backdrop-blur-md border-b border-[#D3E6D8] dark:border-emerald-900/60 px-4 sm:px-6 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <div className="lg:hidden">
               <CrestLogo size="sm" />
             </div>
             <div className="min-w-0">
-              <h1 className="text-sm sm:text-base font-bold text-[#0B2416] truncate">
+              <h1 className="text-sm sm:text-base font-bold text-[#0B2416] dark:text-emerald-50 truncate">
                 {currentNavLabel}
               </h1>
-              <p className="hidden sm:block text-[11px] text-[#52705E] truncate">
+              <p className="hidden sm:block text-[11px] text-[#52705E] dark:text-emerald-300/80 truncate">
                 {CLASS_TITLE} · {SCHOOL_NAME}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+              aria-label={theme === 'dark' ? 'Ganti ke Mode Terang' : 'Ganti ke Mode Gelap'}
+              title={theme === 'dark' ? 'Mode Terang' : 'Mode Gelap'}
+              className="min-h-[42px] min-w-[42px] px-2.5 rounded-xl bg-[#F0F7F2] dark:bg-[#132C1E] hover:bg-[#E2EFE6] dark:hover:bg-[#1A3927] border border-[#C6E0CE] dark:border-emerald-800 flex items-center justify-center text-[#0B6B3A] dark:text-emerald-300 cursor-pointer"
+            >
+              {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
+            </button>
+
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
               aria-label="Buka pencarian global"
-              className="min-h-[42px] px-3 rounded-xl bg-[#F0F7F2] hover:bg-[#E2EFE6] border border-[#C6E0CE] flex items-center gap-2 text-xs font-semibold text-[#0B2416] cursor-pointer"
+              className="min-h-[42px] px-3 rounded-xl bg-[#F0F7F2] dark:bg-[#132C1E] hover:bg-[#E2EFE6] dark:hover:bg-[#1A3927] border border-[#C6E0CE] dark:border-emerald-800 flex items-center gap-2 text-xs font-semibold text-[#0B2416] dark:text-emerald-100 cursor-pointer"
             >
-              <Search className="w-4 h-4 text-[#0B6B3A]" />
+              <Search className="w-4 h-4 text-[#0B6B3A] dark:text-emerald-400" />
               <span className="hidden sm:inline">Cari</span>
             </button>
 
@@ -838,6 +1034,7 @@ export default function App() {
               assignments={assignments}
               taskProgressMap={taskProgressMap}
               schedules={effectiveSchedules.items}
+              picketSchedules={picketSchedules}
               agendas={agendas}
               treasury={treasury}
               adminMessages={adminMessages}
@@ -849,6 +1046,45 @@ export default function App() {
               needsOfficialScheduleSync={needsOfficialScheduleSync}
               onInitSchedule={handleInitSchedule}
               isInitializingSchedule={isInitializingSchedule}
+            />
+          )}
+
+          {activeTab === 'chat' && (
+            <ChatView
+              profile={profile}
+              messages={chatMessages}
+              botContext={c6aContext}
+              onOpenC6AAssistant={() => setActiveTab('c6a-ai')}
+              settings={settings}
+              members={members}
+              chatRooms={chatRooms}
+              presenceMap={presenceMap}
+              blockedUids={blockedUids}
+              initialRoomId={selectedChatRoomId}
+              onClearInitialRoomId={() => setSelectedChatRoomId(null)}
+            />
+          )}
+
+          {activeTab === 'grup-kelas' && (
+            <WhatsAppGroupView
+              profile={profile}
+              settings={settings}
+              chatRooms={chatRooms}
+              onOpenRoom={handleOpenChatRoom}
+            />
+          )}
+
+          {activeTab === 'game-center' && (
+            <GameCenterView
+              profile={profile}
+              settings={settings}
+              members={members}
+              chatRooms={chatRooms}
+              presenceMap={presenceMap}
+              blockedUids={blockedUids}
+              botContext={c6aContext}
+              onOpenChatRoom={handleOpenChatRoom}
+              onOpenC6AAssistant={() => setActiveTab('c6a-ai')}
             />
           )}
 
@@ -901,12 +1137,10 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'chat' && (
-            <ChatView
+          {activeTab === 'piket' && (
+            <PicketScheduleView
               profile={profile}
-              messages={chatMessages}
-              botContext={c6aContext}
-              onOpenC6AAssistant={() => setActiveTab('c6a-ai')}
+              picketSchedules={picketSchedules}
             />
           )}
 
@@ -930,6 +1164,20 @@ export default function App() {
             />
           )}
 
+          {activeTab === 'pengaturan' && (
+            <SettingsView
+              profile={profile}
+              theme={theme}
+              onChangeTheme={setTheme}
+              compactMode={compactMode}
+              onToggleCompactMode={handleToggleCompactMode}
+              browserPushEnabled={browserPushEnabled}
+              onEnableBrowserPush={handleEnableBrowserPush}
+              blockedUsers={blockedUsers}
+              onNavigate={setActiveTab}
+            />
+          )}
+
           {activeTab === 'bantuan' && (
             <HelpCenterView settings={settings} role={profile.role} onNavigate={setActiveTab} />
           )}
@@ -949,8 +1197,11 @@ export default function App() {
               adminMessages={adminMessages}
               notifications={combinedNotifications}
               clientErrors={clientErrors}
+              userReports={userReports}
+              chatRooms={chatRooms}
               onClearClientErrors={() => setClientErrors([])}
               onNavigateTab={setActiveTab}
+              onOpenChatRoom={handleOpenChatRoom}
               onSyncOfficialSchedule={handleInitSchedule}
             />
           )}
@@ -965,6 +1216,7 @@ export default function App() {
         announcements={announcements}
         agendas={agendas}
         schedules={effectiveSchedules.items}
+        picketSchedules={picketSchedules}
         adminMessages={adminMessages}
         chatMessages={chatMessages}
         onNavigate={setActiveTab}
@@ -976,6 +1228,7 @@ export default function App() {
         onSelectTab={setActiveTab}
         onLogout={handleLogout}
         unreadNotificationsCount={unreadNotificationsCount}
+        unreadChatCount={unreadChatCount}
       />
     </div>
   );

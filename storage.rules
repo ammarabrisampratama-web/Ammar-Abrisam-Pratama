@@ -1,0 +1,34 @@
+rules_version = '2';
+
+// Aturan Keamanan Firebase Storage untuk Portal Digital Kelas 6A MI Al-Hidayah Sawotratap
+// Salin isi file ini ke Firebase Console -> Storage -> Rules apabila Firebase Storage baru diaktifkan.
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    // Media Chat (Foto, Video <= 15MB, Pesan Suara <= 5MB)
+    match /class6a_media/{roomId}/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && request.auth.uid == userId
+        && (
+          (request.resource.contentType.matches('image/.*') && request.resource.size <= 8 * 1024 * 1024)
+          || (request.resource.contentType.matches('audio/.*') && request.resource.size <= 5 * 1024 * 1024)
+          || (request.resource.contentType.matches('video/.*') && request.resource.size <= 15 * 1024 * 1024)
+        );
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Foto Profil Pengguna (Maks 3MB)
+    match /profile_avatars/{userId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && request.auth.uid == userId
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size <= 3 * 1024 * 1024;
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+  }
+}

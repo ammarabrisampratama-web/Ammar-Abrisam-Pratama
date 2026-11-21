@@ -13,6 +13,7 @@ import type {
   DerivedTaskStatus,
   GlobalSearchResult,
   NavTab,
+  PicketScheduleItem,
   ScheduleItem,
   TaskProgressStatus,
   TreasuryCategory,
@@ -22,6 +23,7 @@ import type {
   UserPublic,
   UserRole,
 } from '../types';
+import { OFFICIAL_WHATSAPP_GROUP_URL, GAME_CATALOG } from './mediaUtils';
 
 export const CLASS_ID = '6A' as const;
 export const SCHOOL_NAME = 'MI Al-Hidayah Sawotratap';
@@ -39,6 +41,11 @@ export const DEFAULT_CLASS_SETTINGS: Omit<ClassSettings, 'updatedAt'> = {
   allowStudentCreateAgenda: true,
   allowAdminManageTreasury: true,
   allowAdminManageSchedule: true,
+  whatsappGroupUrl: OFFICIAL_WHATSAPP_GROUP_URL,
+  allowGameCenter: true,
+  allowVoiceNotes: true,
+  allowMediaUpload: true,
+  allowPrivateChat: true,
 };
 
 // Official 6-day curriculum for Kelas 6A MI Al-Hidayah Sawotratap (times empty until configured by Owner)
@@ -174,25 +181,37 @@ export function canManageAnnouncements(role: UserRole | null | undefined): boole
   return role === 'owner' || role === 'admin';
 }
 
-export function canManageSchedule(role: UserRole | null | undefined, settings?: Pick<ClassSettings, 'allowAdminManageSchedule'>): boolean {
+export function canManageSchedule(
+  role: UserRole | null | undefined,
+  settings?: Pick<ClassSettings, 'allowAdminManageSchedule'>
+): boolean {
   if (role === 'owner') return true;
   if (role === 'admin') return settings?.allowAdminManageSchedule ?? true;
   return false;
 }
 
-export function canManageTreasury(role: UserRole | null | undefined, settings?: Pick<ClassSettings, 'allowAdminManageTreasury'>): boolean {
+export function canManageTreasury(
+  role: UserRole | null | undefined,
+  settings?: Pick<ClassSettings, 'allowAdminManageTreasury'>
+): boolean {
   if (role === 'owner') return true;
   if (role === 'admin') return settings?.allowAdminManageTreasury ?? true;
   return false;
 }
 
-export function canCreateAssignment(role: UserRole | null | undefined, settings?: Pick<ClassSettings, 'allowStudentCreateTask'>): boolean {
+export function canCreateAssignment(
+  role: UserRole | null | undefined,
+  settings?: Pick<ClassSettings, 'allowStudentCreateTask'>
+): boolean {
   if (!role) return false;
   if (role === 'owner' || role === 'admin') return true;
   return settings?.allowStudentCreateTask ?? true;
 }
 
-export function canCreateAgenda(role: UserRole | null | undefined, settings?: Pick<ClassSettings, 'allowStudentCreateAgenda'>): boolean {
+export function canCreateAgenda(
+  role: UserRole | null | undefined,
+  settings?: Pick<ClassSettings, 'allowStudentCreateAgenda'>
+): boolean {
   if (!role) return false;
   if (role === 'owner' || role === 'admin') return true;
   return settings?.allowStudentCreateAgenda ?? true;
@@ -256,7 +275,10 @@ export function validateAnnouncementInput(input: {
   if (title.length < SCHEMA_LIMITS.titleMin || title.length > SCHEMA_LIMITS.titleMax) {
     return `Judul pengumuman harus ${SCHEMA_LIMITS.titleMin}–${SCHEMA_LIMITS.titleMax} karakter.`;
   }
-  if (content.length < SCHEMA_LIMITS.announcementContentMin || content.length > SCHEMA_LIMITS.announcementContentMax) {
+  if (
+    content.length < SCHEMA_LIMITS.announcementContentMin ||
+    content.length > SCHEMA_LIMITS.announcementContentMax
+  ) {
     return `Isi pengumuman harus ${SCHEMA_LIMITS.announcementContentMin}–${SCHEMA_LIMITS.announcementContentMax} karakter.`;
   }
   if (!ANNOUNCEMENT_CATEGORIES.includes(input.category)) {
@@ -282,10 +304,16 @@ export function validateAssignmentInput(input: {
   if (input.title.trim().length < SCHEMA_LIMITS.titleMin || input.title.trim().length > SCHEMA_LIMITS.titleMax) {
     return `Judul tugas harus ${SCHEMA_LIMITS.titleMin}–${SCHEMA_LIMITS.titleMax} karakter.`;
   }
-  if (input.description.trim().length < SCHEMA_LIMITS.assignmentDescMin || input.description.trim().length > SCHEMA_LIMITS.assignmentDescMax) {
+  if (
+    input.description.trim().length < SCHEMA_LIMITS.assignmentDescMin ||
+    input.description.trim().length > SCHEMA_LIMITS.assignmentDescMax
+  ) {
     return `Deskripsi tugas harus ${SCHEMA_LIMITS.assignmentDescMin}–${SCHEMA_LIMITS.assignmentDescMax} karakter.`;
   }
-  if (!SCHEMA_LIMITS.datePattern.test(input.assignedDate.trim()) || !SCHEMA_LIMITS.datePattern.test(input.dueDate.trim())) {
+  if (
+    !SCHEMA_LIMITS.datePattern.test(input.assignedDate.trim()) ||
+    !SCHEMA_LIMITS.datePattern.test(input.dueDate.trim())
+  ) {
     return 'Tanggal diberikan dan tenggat harus berformat YYYY-MM-DD.';
   }
   if (!ASSIGNMENT_PRIORITIES.includes(input.priority)) {
@@ -330,6 +358,23 @@ export function validateScheduleInput(input: {
   return null;
 }
 
+export function validatePicketInput(input: {
+  day: DayOfWeek;
+  students: string[];
+  tasks: string[];
+  coordinator: string;
+  note: string;
+}): string | null {
+  if (!DAYS_ORDER.includes(input.day)) return 'Hari piket tidak valid.';
+  if (input.students.length > 20) return 'Maksimal 20 siswa per hari piket.';
+  if (input.tasks.length === 0 || input.tasks.length > 15) {
+    return 'Jumlah daftar tugas piket harus antara 1–15 item.';
+  }
+  if (input.coordinator.trim().length > 80) return 'Nama koordinator maksimal 80 karakter.';
+  if (input.note.trim().length > 200) return 'Catatan piket maksimal 200 karakter.';
+  return null;
+}
+
 export function validateAgendaInput(input: {
   title: string;
   description: string;
@@ -340,7 +385,10 @@ export function validateAgendaInput(input: {
   if (input.title.trim().length < SCHEMA_LIMITS.titleMin || input.title.trim().length > SCHEMA_LIMITS.titleMax) {
     return `Judul agenda harus ${SCHEMA_LIMITS.titleMin}–${SCHEMA_LIMITS.titleMax} karakter.`;
   }
-  if (input.description.trim().length < SCHEMA_LIMITS.agendaDescMin || input.description.trim().length > SCHEMA_LIMITS.agendaDescMax) {
+  if (
+    input.description.trim().length < SCHEMA_LIMITS.agendaDescMin ||
+    input.description.trim().length > SCHEMA_LIMITS.agendaDescMax
+  ) {
     return `Deskripsi agenda harus ${SCHEMA_LIMITS.agendaDescMin}–${SCHEMA_LIMITS.agendaDescMax} karakter.`;
   }
   if (!SCHEMA_LIMITS.datePattern.test(input.eventDate.trim())) {
@@ -372,7 +420,10 @@ export function validateTreasuryInput(input: {
   if (!Number.isInteger(input.amount) || input.amount <= 0 || input.amount > SCHEMA_LIMITS.treasuryAmountMax) {
     return 'Nominal harus bilangan bulat antara Rp 1 hingga Rp 100.000.000.';
   }
-  if (input.description.trim().length < SCHEMA_LIMITS.treasuryDescMin || input.description.trim().length > SCHEMA_LIMITS.treasuryDescMax) {
+  if (
+    input.description.trim().length < SCHEMA_LIMITS.treasuryDescMin ||
+    input.description.trim().length > SCHEMA_LIMITS.treasuryDescMax
+  ) {
     return `Keterangan harus ${SCHEMA_LIMITS.treasuryDescMin}–${SCHEMA_LIMITS.treasuryDescMax} karakter.`;
   }
   if (!TREASURY_CATEGORIES.includes(input.category)) {
@@ -625,6 +676,17 @@ export function formatTimeOnly(ts: unknown): string {
   }).format(new Date(ms));
 }
 
+export function formatRelativeLastSeen(ts: unknown, isOnline: boolean, hideOnlineStatus?: boolean): string {
+  if (hideOnlineStatus) return 'Status disembunyikan';
+  if (isOnline) return 'Online';
+  const ms = toMillis(ts);
+  if (!ms) return 'Offline';
+  const diffMin = Math.max(0, Math.floor((Date.now() - ms) / 60000));
+  if (diffMin < 2) return 'Baru saja aktif';
+  if (diffMin < 60) return `Terakhir dilihat ${diffMin} menit lalu`;
+  return `Terakhir dilihat ${formatTimeOnly(ms)} WIB`;
+}
+
 export function getRoleLabel(role: UserRole): string {
   if (role === 'owner') return 'Owner / Wali Kelas';
   if (role === 'admin') return 'Admin / Pengurus';
@@ -645,10 +707,46 @@ export function performGlobalSearch(params: {
   schedules: ScheduleItem[];
   adminMessages: AdminMessage[];
   chatMessages: ChatMessage[];
+  picketSchedules?: PicketScheduleItem[];
 }): GlobalSearchResult[] {
   const q = params.query.trim().toLowerCase();
   if (!q) return [];
   const results: GlobalSearchResult[] = [];
+
+  for (const g of GAME_CATALOG) {
+    if (
+      g.name.toLowerCase().includes(q) ||
+      g.shortName.toLowerCase().includes(q) ||
+      g.genre.toLowerCase().includes(q) ||
+      'mabar game'.includes(q)
+    ) {
+      results.push({
+        id: `game-${g.id}`,
+        section: 'Game Center',
+        title: g.name,
+        subtitle: `${g.genre} · Komunitas & Chat Mabar Kelas 6A`,
+        tab: 'game-center',
+      });
+    }
+  }
+
+  for (const p of params.picketSchedules ?? []) {
+    const joinedStudents = p.students.join(', ');
+    if (
+      p.day.toLowerCase().includes(q) ||
+      joinedStudents.toLowerCase().includes(q) ||
+      p.tasks.some((t) => t.toLowerCase().includes(q)) ||
+      'piket'.includes(q)
+    ) {
+      results.push({
+        id: `piket-${p.day}`,
+        section: 'Jadwal Piket',
+        title: `Piket Hari ${p.day}`,
+        subtitle: joinedStudents || `${p.tasks.length} tugas kebersihan`,
+        tab: 'piket',
+      });
+    }
+  }
 
   for (const a of params.assignments) {
     if (
@@ -695,7 +793,11 @@ export function performGlobalSearch(params: {
   }
 
   for (const s of params.schedules) {
-    if (s.subject.toLowerCase().includes(q) || s.teacher.toLowerCase().includes(q) || s.day.toLowerCase().includes(q)) {
+    if (
+      s.subject.toLowerCase().includes(q) ||
+      s.teacher.toLowerCase().includes(q) ||
+      s.day.toLowerCase().includes(q)
+    ) {
       results.push({
         id: `sch-${s.id}`,
         section: 'Jadwal',
@@ -738,7 +840,17 @@ export function performGlobalSearch(params: {
 
 export function buildTreasuryCsv(entries: TreasuryEntry[]): string {
   const escape = (val: string) => `"${String(val).replace(/"/g, '""')}"`;
-  const header = ['Tanggal', 'Jenis', 'Kategori', 'Nominal', 'Keterangan', 'Nama Siswa', 'Status', 'Catatan Koreksi', 'Dicatat Oleh'].join(',');
+  const header = [
+    'Tanggal',
+    'Jenis',
+    'Kategori',
+    'Nominal',
+    'Keterangan',
+    'Nama Siswa',
+    'Status',
+    'Catatan Koreksi',
+    'Dicatat Oleh',
+  ].join(',');
   const rows = entries.map((e) =>
     [
       escape(e.date),

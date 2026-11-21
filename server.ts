@@ -131,9 +131,8 @@ async function startServer() {
   const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
   const isProduction =
     hasDist &&
-    (process.env.NODE_ENV === 'production' ||
-      process.env.npm_lifecycle_event === 'start' ||
-      process.env.NODE_ENV !== 'development');
+    process.env.npm_lifecycle_event !== 'dev' &&
+    (process.env.NODE_ENV === 'production' || process.env.npm_lifecycle_event === 'start');
 
   if (isProduction) {
     app.use(express.static(distPath));
@@ -149,9 +148,27 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  const port = Number(process.env.PORT || 3000);
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Server Kelas 6A (dengan C6A AI) berjalan di http://0.0.0.0:${port}`);
+  const readCliArg = (flag: string): string | undefined => {
+    const idx = process.argv.indexOf(flag);
+    if (idx !== -1 && process.argv[idx + 1]) {
+      return process.argv[idx + 1];
+    }
+    const prefix = `${flag}=`;
+    const inline = process.argv.find((arg) => arg.startsWith(prefix));
+    return inline ? inline.slice(prefix.length) : undefined;
+  };
+
+  const cliPortRaw = readCliArg('--port');
+  const envPortRaw =
+    process.env.PORT && process.env.PORT !== process.env.NGINX_PORT
+      ? process.env.PORT
+      : undefined;
+  const fallbackPortRaw = process.env.DEFAULT_APP_PORT || '3000';
+  const port = Number(cliPortRaw || envPortRaw || fallbackPortRaw) || 3000;
+  const host = readCliArg('--host') || '0.0.0.0';
+
+  app.listen(port, host, () => {
+    console.log(`Server Kelas 6A (dengan C6A AI) berjalan di http://${host}:${port}`);
   });
 }
 

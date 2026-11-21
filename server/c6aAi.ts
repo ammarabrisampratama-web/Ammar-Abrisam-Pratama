@@ -2,6 +2,7 @@ import { type GenerateContentResponse, GoogleGenAI, ThinkingLevel } from '@googl
 
 export const MODEL_NAME = 'gemini-4-hydrogen';
 export const FALLBACK_MODEL_NAME = 'gemini-3.1-flash-lite';
+export const EMERGENCY_FALLBACK_MODEL_NAME = 'gemini-2.5-flash';
 export const C6A_AI_VERSION = 'C6A AI v1';
 
 export interface ChatTurnInput {
@@ -190,6 +191,19 @@ export function mapGeminiError(error: unknown): { status: number; message: strin
       message: `Model C6A AI v1 (${MODEL_NAME}) belum tersedia pada kunci API saat ini (HTTP 404).`,
     };
   }
+  if (
+    status === 503 ||
+    upper.includes('UNAVAILABLE') ||
+    upper.includes('HIGH DEMAND') ||
+    upper.includes('OVERLOADED')
+  ) {
+    console.warn(`C6A AI v1 Upstream Busy (HTTP 503): ${sanitizeErrorDetail(error)}`);
+    return {
+      status: 503,
+      message:
+        'Server model Gemini sedang mengalami lonjakan permintaan sementara (HTTP 503). Silakan coba kirim ulang beberapa detik lagi.',
+    };
+  }
   const detail = sanitizeErrorDetail(error);
   console.error('C6A AI v1 Unexpected Error:', detail);
   return {
@@ -314,25 +328,58 @@ async function runWithTimeout<T>(
   }
 }
 
+function getAttemptPlan(fastMode: boolean): Array<{ model: string; timeoutMs: number }> {
+  return fastMode
+    ? [
+        { model: FALLBACK_MODEL_NAME, timeoutMs: 3500 },
+        { model: EMERGENCY_FALLBACK_MODEL_NAME, timeoutMs: 4500 },
+      ]
+    : [
+        { model: MODEL_NAME, timeoutMs: 2800 },
+        { model: FALLBACK_MODEL_NAME, timeoutMs: 2800 },
+        { model: EMERGENCY_FALLBACK_MODEL_NAME, timeoutMs: 3000 },
+      ];
+}
+
 export async function startC6AStreamWithFallback(
   ai: GoogleGenAI,
   parsed: ParsedC6ARequest
 ): Promise<{ stream: AsyncIterable<unknown>; modelUsed: string }> {
-  const attempts: Array<{ model: string; timeoutMs: number }> = parsed.fastMode
-    ? [{ model: FALLBACK_MODEL_NAME, timeoutMs: 8000 }]
-    : [
-        { model: MODEL_NAME, timeoutMs: 4000 },
-        { model: FALLBACK_MODEL_NAME, timeoutMs: 4500 },
-      ];
+  const attempts = getAttemptPlan(parsed.fastMode);
 
   let lastError: unknown;
   for (const attempt of attempts) {
     try {
-      const stream = await runWithTimeout(attempt.timeoutMs, async (signal) => {
+      const started = await runWithTimeout(attempt.timeoutMs, async (signal) => {
         const chat = createC6AChatSession(ai, parsed, attempt.model, signal);
-        return chat.sendMessageStream({ message: parsed.message });
+        const rawStream = await chat.sendMessageStream({ message: parsed.message });
+        const iterator = rawStream[Symbol.asyncIterator]();
+        let firstText = '';
+        while (true) {
+          const step = await iterator.next();
+          if (step.done) break;
+          const delta = extractChunkText(step.value);
+          if (delta) {
+            firstText = delta;
+            break;
+          }
+        }
+        if (!firstText) {
+          throw Object.assign(new Error('Empty stream response from model'), { status: 503 });
+        }
+        return { firstText, iterator };
       });
-      return { stream, modelUsed: attempt.model };
+
+      async function* replayStream(): AsyncIterable<unknown> {
+        yield { text: started.firstText };
+        while (true) {
+          const step = await started.iterator.next();
+          if (step.done) break;
+          yield step.value;
+        }
+      }
+
+      return { stream: replayStream(), modelUsed: attempt.model };
     } catch (err) {
       lastError = err;
       if (!isTransientOrModelError(err)) {
@@ -347,19 +394,18 @@ export async function sendC6AMessageWithFallback(
   ai: GoogleGenAI,
   parsed: ParsedC6ARequest
 ): Promise<{ response: GenerateContentResponse; modelUsed: string }> {
-  const attempts: Array<{ model: string; timeoutMs: number }> = parsed.fastMode
-    ? [{ model: FALLBACK_MODEL_NAME, timeoutMs: 8000 }]
-    : [
-        { model: MODEL_NAME, timeoutMs: 4000 },
-        { model: FALLBACK_MODEL_NAME, timeoutMs: 4500 },
-      ];
+  const attempts = getAttemptPlan(parsed.fastMode);
 
   let lastError: unknown;
   for (const attempt of attempts) {
     try {
       const response = await runWithTimeout(attempt.timeoutMs, async (signal) => {
         const chat = createC6AChatSession(ai, parsed, attempt.model, signal);
-        return chat.sendMessage({ message: parsed.message });
+        const res = await chat.sendMessage({ message: parsed.message });
+        if (!(res.text ?? '').trim()) {
+          throw Object.assign(new Error('Empty response from model'), { status: 503 });
+        }
+        return res;
       });
       return { response, modelUsed: attempt.model };
     } catch (err) {

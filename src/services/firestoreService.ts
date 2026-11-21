@@ -1,6 +1,7 @@
 import type { User } from 'firebase/auth';
 import {
   addDoc,
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -21,9 +22,16 @@ import type {
   AnnouncementPriority,
   Assignment,
   AssignmentPriority,
+  ChatMessageType,
+  ChatReplyRef,
   ClassSettings,
   DayOfWeek,
+  GameId,
+  GameIdMap,
+  LfgStatus,
   NotificationType,
+  ReportCategory,
+  ReportStatus,
   TaskProgressStatus,
   TreasuryCategory,
   TreasuryPaymentStatus,
@@ -31,6 +39,14 @@ import type {
   UserPublic,
   UserRole,
 } from '../types';
+import {
+  buildDefaultPicketSchedules,
+  buildDmRoomId,
+  GAME_CATALOG,
+  GAME_ROOM_IDS,
+  OFFICIAL_WHATSAPP_GROUP_URL,
+} from '../utils/mediaUtils';
+import { inspectMessageSafety, validateReportInput } from '../utils/moderation';
 import {
   CLASS_ID,
   DAYS_ORDER,
@@ -42,6 +58,7 @@ import {
   validateAnnouncementInput,
   validateAssignmentInput,
   validateChatText,
+  validatePicketInput,
   validateProfileInput,
   validateScheduleInput,
   validateTreasuryInput,
@@ -182,6 +199,9 @@ export function normalizeUserPublic(raw: Partial<UserPublic> & { uid: string }):
     classId: '6A',
     lastLoginAt: raw.lastLoginAt ?? null,
     updatedAt: raw.updatedAt ?? null,
+    bio: typeof raw.bio === 'string' ? raw.bio : '',
+    gameIds: raw.gameIds && typeof raw.gameIds === 'object' ? raw.gameIds : {},
+    hideOnlineStatus: Boolean(raw.hideOnlineStatus),
   };
 }
 
@@ -201,7 +221,13 @@ export async function createOrUpdateUserProfile(
   displayName: string,
   nickname: string,
   absenNumber: number,
-  isFirstLoginAudit: boolean
+  isFirstLoginAudit: boolean,
+  extras?: {
+    photoURL?: string;
+    bio?: string;
+    gameIds?: GameIdMap;
+    hideOnlineStatus?: boolean;
+  }
 ): Promise<UserPublic> {
   const isOwnerEmail = firebaseUser.email === BOOTSTRAPPED_OWNER_EMAIL;
   const err = validateProfileInput(displayName, nickname, absenNumber, isOwnerEmail);
@@ -213,25 +239,42 @@ export async function createOrUpdateUserProfile(
     const existingSnap = await getDoc(ref);
     const trimmedName = displayName.trim().slice(0, 80);
     const trimmedNick = nickname.trim().slice(0, 40);
-    const photoURL = (firebaseUser.photoURL || '').slice(0, 500);
+    const fallbackPhoto = (firebaseUser.photoURL || '').slice(0, 1000);
+    const cleanBio = (extras?.bio ?? '').trim().slice(0, 200);
+    const cleanGameIds: GameIdMap = {
+      ff: (extras?.gameIds?.ff ?? '').trim().slice(0, 40),
+      mlbb: (extras?.gameIds?.mlbb ?? '').trim().slice(0, 40),
+      roblox: (extras?.gameIds?.roblox ?? '').trim().slice(0, 40),
+      fcMobile: (extras?.gameIds?.fcMobile ?? '').trim().slice(0, 40),
+    };
 
     if (existingSnap.exists()) {
       const existingData = normalizeUserPublic(existingSnap.data() as Partial<UserPublic> & { uid: string });
-      await updateDoc(ref, {
+      const resolvedPhoto = (extras?.photoURL !== undefined ? extras.photoURL : existingData.photoURL || fallbackPhoto).slice(0, 1000);
+      const updatePayload: Record<string, unknown> = {
         displayName: trimmedName,
         nickname: trimmedNick,
-        photoURL,
+        photoURL: resolvedPhoto,
         absenNumber,
         lastLoginAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (extras?.bio !== undefined) updatePayload.bio = cleanBio;
+      if (extras?.gameIds !== undefined) updatePayload.gameIds = cleanGameIds;
+      if (extras?.hideOnlineStatus !== undefined) updatePayload.hideOnlineStatus = extras.hideOnlineStatus;
+
+      await updateDoc(ref, updatePayload);
       await syncPrivateUserOnLogin(firebaseUser);
       const updatedProfile: UserPublic = {
         ...existingData,
         displayName: trimmedName,
         nickname: trimmedNick,
-        photoURL,
+        photoURL: resolvedPhoto,
         absenNumber,
+        bio: extras?.bio !== undefined ? cleanBio : existingData.bio,
+        gameIds: extras?.gameIds !== undefined ? cleanGameIds : existingData.gameIds,
+        hideOnlineStatus:
+          extras?.hideOnlineStatus !== undefined ? extras.hideOnlineStatus : existingData.hideOnlineStatus,
       };
       if (isFirstLoginAudit) {
         await recordLoginAudit(firebaseUser, updatedProfile);
@@ -245,13 +288,16 @@ export async function createOrUpdateUserProfile(
       uid: firebaseUser.uid,
       displayName: trimmedName,
       nickname: trimmedNick,
-      photoURL,
+      photoURL: fallbackPhoto,
       absenNumber,
       role: assignedRole,
       status: 'aktif',
       classId: CLASS_ID,
       lastLoginAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
+      bio: cleanBio,
+      gameIds: cleanGameIds,
+      hideOnlineStatus: Boolean(extras?.hideOnlineStatus),
     };
     await setDoc(ref, newProfile);
     await syncPrivateUserOnLogin(firebaseUser);
@@ -263,10 +309,78 @@ export async function createOrUpdateUserProfile(
   }
 }
 
+export async function updateOnlinePrivacy(uid: string, hideOnlineStatus: boolean): Promise<void> {
+  const path = `users_public/${uid}`;
+  try {
+    await updateDoc(doc(db, 'users_public', uid), {
+      hideOnlineStatus,
+      updatedAt: serverTimestamp(),
+    });
+    await setDoc(doc(db, 'presence', uid), {
+      uid,
+      isOnline: !hideOnlineStatus,
+      hideOnlineStatus,
+      lastSeenAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateUserPresence(
+  uid: string,
+  isOnline: boolean,
+  hideOnlineStatus: boolean
+): Promise<void> {
+  try {
+    await setDoc(doc(db, 'presence', uid), {
+      uid,
+      isOnline: hideOnlineStatus ? false : isOnline,
+      hideOnlineStatus,
+      lastSeenAt: serverTimestamp(),
+    });
+  } catch (error) {
+    console.error('Presence sync warning:', error);
+  }
+}
+
+export async function blockClassmate(
+  uid: string,
+  targetUid: string,
+  targetName: string
+): Promise<void> {
+  if (uid === targetUid) throw new Error('Tidak dapat memblokir akun sendiri.');
+  const path = `users_private/${uid}/blocked_users/${targetUid}`;
+  try {
+    await setDoc(doc(db, 'users_private', uid, 'blocked_users', targetUid), {
+      targetUid,
+      targetName: targetName.trim().slice(0, 80) || 'Anggota 6A',
+      blockedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function unblockClassmate(uid: string, targetUid: string): Promise<void> {
+  const path = `users_private/${uid}/blocked_users/${targetUid}`;
+  try {
+    await deleteDoc(doc(db, 'users_private', uid, 'blocked_users', targetUid));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
 export async function updateMemberRoleAndStatus(
   actor: UserPublic,
   target: UserPublic,
-  updates: { role?: 'admin' | 'siswa'; status?: AccountStatus; nickname?: string; displayName?: string; absenNumber?: number }
+  updates: {
+    role?: 'admin' | 'siswa';
+    status?: AccountStatus;
+    nickname?: string;
+    displayName?: string;
+    absenNumber?: number;
+  }
 ): Promise<void> {
   if (actor.role !== 'owner') {
     throw new Error('Hanya Owner yang dapat mengelola akun dan hak akses.');
@@ -621,6 +735,70 @@ export async function initializeOfficial6DaySchedule(
   }
 }
 
+// --- Jadwal Piket ---
+export async function savePicketSchedule(
+  actor: UserPublic,
+  input: {
+    day: DayOfWeek;
+    students: string[];
+    tasks: string[];
+    coordinator: string;
+    note: string;
+  }
+): Promise<void> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat mengatur Jadwal Piket.');
+  }
+  const cleanStudents = input.students.map((s) => s.trim()).filter(Boolean).slice(0, 20);
+  const cleanTasks = input.tasks.map((t) => t.trim()).filter(Boolean).slice(0, 15);
+  const err = validatePicketInput({ ...input, students: cleanStudents, tasks: cleanTasks });
+  if (err) throw new Error(err);
+
+  const picketId = input.day.toLowerCase();
+  const path = `picket_schedules/${picketId}`;
+  try {
+    await setDoc(doc(db, 'picket_schedules', picketId), {
+      classId: CLASS_ID,
+      day: input.day,
+      students: cleanStudents,
+      tasks: cleanTasks,
+      coordinator: input.coordinator.trim().slice(0, 80),
+      note: input.note.trim().slice(0, 200),
+      updatedById: actor.uid,
+      updatedAt: serverTimestamp(),
+    });
+    await recordActivityLog(actor, 'Perbarui Jadwal Piket', 'picket_schedules', `Piket hari ${input.day}`);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function initializeDefaultPicketSchedules(actor: UserPublic): Promise<void> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat menyinkronkan template Jadwal Piket.');
+  }
+  const defaults = buildDefaultPicketSchedules();
+  const batch = writeBatch(db);
+  for (const item of defaults) {
+    batch.set(doc(db, 'picket_schedules', item.id), {
+      classId: CLASS_ID,
+      day: item.day,
+      students: item.students,
+      tasks: item.tasks,
+      coordinator: item.coordinator,
+      note: item.note,
+      updatedById: actor.uid,
+      updatedAt: serverTimestamp(),
+    });
+  }
+  try {
+    await batch.commit();
+    await recordActivityLog(actor, 'Inisialisasi Jadwal Piket', 'picket_schedules', 'Template Senin–Sabtu');
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'picket_schedules_batch');
+  }
+}
+
 // --- Agendas ---
 export async function createAgendaItem(
   actor: UserPublic,
@@ -794,10 +972,13 @@ export async function deleteTreasuryEntry(actor: UserPublic, id: string, desc: s
   }
 }
 
-// --- Chat & Admin Messages ---
+// --- Legacy Chat + Upgraded WhatsApp-Style Chat Rooms ---
 export async function sendChatMessage(actor: UserPublic, text: string): Promise<void> {
   const err = validateChatText(text);
   if (err) throw new Error(err);
+  const safety = inspectMessageSafety(text, { isPublicRoom: true });
+  if (!safety.allowed) throw new Error(safety.reason);
+
   const path = 'chat_messages';
   try {
     await addDoc(collection(db, path), {
@@ -822,6 +1003,597 @@ export async function deleteChatMessage(id: string): Promise<void> {
   }
 }
 
+function getSystemRoomDefinition(roomId: string): {
+  type: 'class' | 'game';
+  name: string;
+  description: string;
+  gameId: string;
+} | null {
+  if (roomId === 'kelas-6a') {
+    return {
+      type: 'class',
+      name: 'Grup Utama Kelas 6A',
+      description: 'Ruang diskusi resmi seluruh siswa, Admin, dan Wali Kelas 6A MI Al-Hidayah Sawotratap.',
+      gameId: '',
+    };
+  }
+  const gameEntry = GAME_CATALOG.find((g) => GAME_ROOM_IDS[g.gameId] === roomId);
+  if (gameEntry) {
+    return {
+      type: 'game',
+      name: `Chat Mabar ${gameEntry.shortName}`,
+      description: gameEntry.description,
+      gameId: gameEntry.gameId,
+    };
+  }
+  return null;
+}
+
+export async function ensureSystemChatRoom(roomId: string, actor: UserPublic): Promise<void> {
+  const def = getSystemRoomDefinition(roomId);
+  if (!def) return;
+  const ref = doc(db, 'chat_rooms', roomId);
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      await setDoc(ref, {
+        roomId,
+        classId: CLASS_ID,
+        type: def.type,
+        name: def.name,
+        description: def.description,
+        gameId: def.gameId,
+        participantIds: [],
+        pinnedMessageId: '',
+        pinnedText: '',
+        pinnedByName: '',
+        lastMessageText: def.description.slice(0, 120),
+        lastMessageSenderId: '',
+        lastMessageAt: serverTimestamp(),
+        createdBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    console.error('Ensure system room warning:', error);
+  }
+}
+
+export async function ensureDmRoom(actor: UserPublic, targetUser: UserPublic): Promise<string> {
+  const dmId = buildDmRoomId(actor.uid, targetUser.uid);
+  const path = `chat_rooms/${dmId}`;
+  try {
+    const ref = doc(db, 'chat_rooms', dmId);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      const participants = [actor.uid, targetUser.uid].sort();
+      await setDoc(ref, {
+        roomId: dmId,
+        classId: CLASS_ID,
+        type: 'dm',
+        name: `${actor.nickname || actor.displayName} ↔ ${targetUser.nickname || targetUser.displayName}`.slice(0, 100),
+        description: 'Percakapan pribadi antarsiswa Kelas 6A',
+        gameId: '',
+        participantIds: participants,
+        pinnedMessageId: '',
+        pinnedText: '',
+        pinnedByName: '',
+        lastMessageText: 'Percakapan pribadi dimulai',
+        lastMessageSenderId: '',
+        lastMessageAt: serverTimestamp(),
+        createdBy: actor.uid,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return dmId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function createCustomGroupRoom(
+  actor: UserPublic,
+  name: string,
+  description: string
+): Promise<string> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat membuat grup diskusi kelas baru.');
+  }
+  const cleanName = name.trim().slice(0, 100);
+  if (cleanName.length < 3) throw new Error('Nama grup minimal 3 karakter.');
+  const roomId = `grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const path = `chat_rooms/${roomId}`;
+  try {
+    await setDoc(doc(db, 'chat_rooms', roomId), {
+      roomId,
+      classId: CLASS_ID,
+      type: 'group',
+      name: cleanName,
+      description: description.trim().slice(0, 240) || 'Grup diskusi tambahan Kelas 6A',
+      gameId: '',
+      participantIds: [],
+      pinnedMessageId: '',
+      pinnedText: '',
+      pinnedByName: '',
+      lastMessageText: 'Grup dibuat',
+      lastMessageSenderId: actor.uid,
+      lastMessageAt: serverTimestamp(),
+      createdBy: actor.uid,
+      updatedAt: serverTimestamp(),
+    });
+    await recordActivityLog(actor, 'Buat Grup Chat', 'chat_rooms', cleanName);
+    return roomId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteCustomGroupRoom(
+  actor: UserPublic,
+  roomId: string,
+  roomName: string
+): Promise<void> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat menghapus grup.');
+  }
+  const path = `chat_rooms/${roomId}`;
+  try {
+    await deleteDoc(doc(db, 'chat_rooms', roomId));
+    await recordActivityLog(actor, 'Hapus Grup Chat', 'chat_rooms', roomName);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function sendRoomMessage(
+  actor: UserPublic,
+  input: {
+    roomId: string;
+    isPublicRoom: boolean;
+    messageType: ChatMessageType;
+    text: string;
+    mediaUrls?: string[];
+    mediaNames?: string[];
+    mediaDurationSec?: number;
+    replyTo?: ChatReplyRef | null;
+    forwardedFrom?: string;
+  }
+): Promise<void> {
+  const cleanText = input.text.trim().slice(0, 1500);
+  const mediaUrls = (input.mediaUrls ?? []).slice(0, 5);
+  const mediaNames = (input.mediaNames ?? []).slice(0, 5);
+  if (input.messageType === 'text' && !cleanText) {
+    throw new Error('Pesan teks tidak boleh kosong.');
+  }
+  if (input.messageType !== 'text' && mediaUrls.length === 0) {
+    throw new Error('File media belum siap dikirim.');
+  }
+  if (cleanText) {
+    const safety = inspectMessageSafety(cleanText, { isPublicRoom: input.isPublicRoom });
+    if (!safety.allowed) {
+      throw new Error(safety.reason || 'Pesan ditolak oleh sistem moderasi keamanan.');
+    }
+  }
+
+  await ensureSystemChatRoom(input.roomId, actor);
+
+  const path = `chat_rooms/${input.roomId}/messages`;
+  try {
+    const cleanReply: ChatReplyRef | null = input.replyTo
+      ? {
+          id: input.replyTo.id.slice(0, 128),
+          senderName: input.replyTo.senderName.slice(0, 80),
+          text: input.replyTo.text.slice(0, 200),
+          messageType: input.replyTo.messageType,
+        }
+      : null;
+
+    await addDoc(collection(db, 'chat_rooms', input.roomId, 'messages'), {
+      roomId: input.roomId,
+      classId: CLASS_ID,
+      senderId: actor.uid,
+      senderName: (actor.nickname || actor.displayName).slice(0, 80),
+      senderRole: actor.role,
+      senderPhoto: (actor.photoURL || '').slice(0, 1000),
+      messageType: input.messageType,
+      text: cleanText,
+      mediaUrls,
+      mediaNames,
+      mediaDurationSec: Math.max(0, Math.min(600, Math.round(input.mediaDurationSec ?? 0))),
+      replyTo: cleanReply,
+      forwardedFrom: (input.forwardedFrom ?? '').slice(0, 100),
+      reactions: {},
+      readBy: [actor.uid],
+      deleted: false,
+      moderatedBy: '',
+      editedAt: null,
+      createdAt: serverTimestamp(),
+    });
+
+    const summaryText =
+      input.messageType === 'audio'
+        ? '🎤 Pesan suara'
+        : input.messageType === 'image'
+          ? `📷 Foto${cleanText ? `: ${cleanText}` : ''}`
+          : input.messageType === 'video'
+            ? `🎥 Video${cleanText ? `: ${cleanText}` : ''}`
+            : cleanText;
+
+    await updateDoc(doc(db, 'chat_rooms', input.roomId), {
+      lastMessageText: summaryText.slice(0, 240),
+      lastMessageSenderId: actor.uid,
+      lastMessageAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function editRoomMessage(
+  actor: UserPublic,
+  roomId: string,
+  messageId: string,
+  newText: string,
+  isPublicRoom: boolean
+): Promise<void> {
+  const clean = newText.trim().slice(0, 1500);
+  if (!clean) throw new Error('Teks pesan tidak boleh kosong.');
+  const safety = inspectMessageSafety(clean, { isPublicRoom });
+  if (!safety.allowed) throw new Error(safety.reason);
+
+  const path = `chat_rooms/${roomId}/messages/${messageId}`;
+  try {
+    await updateDoc(doc(db, 'chat_rooms', roomId, 'messages', messageId), {
+      text: clean,
+      editedAt: serverTimestamp(),
+    });
+    await recordActivityLog(actor, 'Edit Pesan Chat', 'chat_rooms', `Room ${roomId}`);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function softDeleteRoomMessage(
+  actor: UserPublic,
+  roomId: string,
+  messageId: string,
+  isModeration: boolean
+): Promise<void> {
+  const path = `chat_rooms/${roomId}/messages/${messageId}`;
+  const label = isModeration
+    ? `Pesan dihapus oleh moderator (${actor.nickname || actor.displayName})`
+    : 'Pesan ini telah dihapus';
+  try {
+    await updateDoc(doc(db, 'chat_rooms', roomId, 'messages', messageId), {
+      deleted: true,
+      text: label,
+      mediaUrls: [],
+      moderatedBy: isModeration ? (actor.nickname || actor.displayName).slice(0, 80) : '',
+    });
+    if (isModeration) {
+      await recordActivityLog(actor, 'Moderasi Hapus Pesan', 'chat_rooms', `Menghapus pesan di room ${roomId}`);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function toggleMessageReaction(
+  roomId: string,
+  messageId: string,
+  uid: string,
+  emoji: string,
+  currentReactions: Record<string, string[]>
+): Promise<void> {
+  const next: Record<string, string[]> = {};
+  for (const [key, uids] of Object.entries(currentReactions || {})) {
+    const cleanList = Array.isArray(uids) ? uids.filter((id) => id !== uid) : [];
+    if (cleanList.length > 0) {
+      next[key] = cleanList;
+    }
+  }
+  const alreadyHadSame = Array.isArray(currentReactions?.[emoji]) && currentReactions[emoji].includes(uid);
+  if (!alreadyHadSame) {
+    next[emoji] = [...(next[emoji] ?? []), uid].slice(0, 60);
+  }
+  try {
+    await updateDoc(doc(db, 'chat_rooms', roomId, 'messages', messageId), {
+      reactions: next,
+    });
+  } catch (error) {
+    console.error('Reaction update warning:', error);
+  }
+}
+
+export async function markRoomMessageRead(
+  roomId: string,
+  messageId: string,
+  uid: string
+): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'chat_rooms', roomId, 'messages', messageId), {
+      readBy: arrayUnion(uid),
+    });
+  } catch (error) {
+    console.error('Read receipt warning:', error);
+  }
+}
+
+export async function pinRoomMessage(
+  actor: UserPublic,
+  roomId: string,
+  messageId: string,
+  pinnedText: string
+): Promise<void> {
+  const path = `chat_rooms/${roomId}`;
+  try {
+    await updateDoc(doc(db, 'chat_rooms', roomId), {
+      pinnedMessageId: messageId.slice(0, 128),
+      pinnedText: pinnedText.trim().slice(0, 300),
+      pinnedByName: (actor.nickname || actor.displayName).slice(0, 80),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function unpinRoomMessage(roomId: string): Promise<void> {
+  const path = `chat_rooms/${roomId}`;
+  try {
+    await updateDoc(doc(db, 'chat_rooms', roomId), {
+      pinnedMessageId: '',
+      pinnedText: '',
+      pinnedByName: '',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function setTypingStatus(
+  roomId: string,
+  actor: UserPublic,
+  isTyping: boolean
+): Promise<void> {
+  const ref = doc(db, 'chat_rooms', roomId, 'typing', actor.uid);
+  try {
+    if (isTyping) {
+      await setDoc(ref, {
+        uid: actor.uid,
+        displayName: (actor.nickname || actor.displayName).slice(0, 80),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await deleteDoc(ref);
+    }
+  } catch {
+    // Ephemeral typing failure is non-fatal
+  }
+}
+
+// --- Game Center ---
+export async function joinOrUpdateGameCommunity(
+  actor: UserPublic,
+  gameId: GameId,
+  input: {
+    inGameName: string;
+    inGameId: string;
+    lfgStatus: LfgStatus;
+    lfgNote: string;
+  },
+  isAlreadyMember: boolean
+): Promise<void> {
+  const safety = inspectMessageSafety(`${input.inGameName} ${input.inGameId} ${input.lfgNote}`, {
+    isPublicRoom: true,
+  });
+  if (!safety.allowed) throw new Error(safety.reason);
+
+  const path = `game_communities/${gameId}/members/${actor.uid}`;
+  const ref = doc(db, 'game_communities', gameId, 'members', actor.uid);
+  try {
+    if (isAlreadyMember) {
+      await updateDoc(ref, {
+        displayName: actor.displayName.slice(0, 80),
+        nickname: (actor.nickname || actor.displayName).slice(0, 40),
+        photoURL: (actor.photoURL || '').slice(0, 1000),
+        role: actor.role,
+        inGameName: input.inGameName.trim().slice(0, 50),
+        inGameId: input.inGameId.trim().slice(0, 50),
+        lfgStatus: input.lfgStatus,
+        lfgNote: input.lfgNote.trim().slice(0, 120),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        uid: actor.uid,
+        gameId,
+        classId: CLASS_ID,
+        displayName: actor.displayName.slice(0, 80),
+        nickname: (actor.nickname || actor.displayName).slice(0, 40),
+        photoURL: (actor.photoURL || '').slice(0, 1000),
+        role: actor.role,
+        inGameName: input.inGameName.trim().slice(0, 50),
+        inGameId: input.inGameId.trim().slice(0, 50),
+        lfgStatus: input.lfgStatus,
+        lfgNote: input.lfgNote.trim().slice(0, 120),
+        joinedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await recordActivityLog(actor, 'Gabung Komunitas Game', 'game_communities', gameId.toUpperCase());
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function leaveGameCommunity(actor: UserPublic, gameId: GameId): Promise<void> {
+  const path = `game_communities/${gameId}/members/${actor.uid}`;
+  try {
+    await deleteDoc(doc(db, 'game_communities', gameId, 'members', actor.uid));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function removeGameMemberByMod(
+  actor: UserPublic,
+  gameId: GameId,
+  targetUid: string,
+  targetName: string
+): Promise<void> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat mengeluarkan anggota komunitas.');
+  }
+  const path = `game_communities/${gameId}/members/${targetUid}`;
+  try {
+    await deleteDoc(doc(db, 'game_communities', gameId, 'members', targetUid));
+    await recordActivityLog(
+      actor,
+      'Moderasi Komunitas Game',
+      'game_communities',
+      `Mengeluarkan ${targetName} dari ${gameId}`
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function createGamePost(
+  actor: UserPublic,
+  gameId: GameId,
+  input: {
+    type: 'update' | 'pengumuman';
+    title: string;
+    content: string;
+    pinned: boolean;
+  }
+): Promise<void> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat memposting update/pengumuman game.');
+  }
+  const title = input.title.trim();
+  const content = input.content.trim();
+  if (title.length < 3 || title.length > 120) throw new Error('Judul harus 3–120 karakter.');
+  if (content.length < 3 || content.length > 1500) throw new Error('Konten harus 3–1500 karakter.');
+
+  const path = `game_communities/${gameId}/posts`;
+  try {
+    await addDoc(collection(db, 'game_communities', gameId, 'posts'), {
+      gameId,
+      classId: CLASS_ID,
+      type: input.type,
+      title,
+      content,
+      pinned: input.pinned,
+      authorId: actor.uid,
+      authorName: (actor.nickname || actor.displayName).slice(0, 80),
+      authorRole: actor.role,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    await createNotificationEvent(actor, {
+      type: 'game',
+      title: `Game Center (${gameId.toUpperCase()}): ${title}`,
+      body: content.slice(0, 140),
+      targetTab: 'game-center',
+    });
+    await recordActivityLog(actor, 'Buat Info Game', 'game_communities', `${gameId}: ${title}`);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function deleteGamePost(
+  actor: UserPublic,
+  gameId: GameId,
+  postId: string,
+  title: string
+): Promise<void> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat menghapus info game.');
+  }
+  const path = `game_communities/${gameId}/posts/${postId}`;
+  try {
+    await deleteDoc(doc(db, 'game_communities', gameId, 'posts', postId));
+    await recordActivityLog(actor, 'Hapus Info Game', 'game_communities', `${gameId}: ${title}`);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+// --- Moderation & Reports ---
+export async function submitUserReport(
+  actor: UserPublic,
+  input: {
+    targetUid: string;
+    targetName: string;
+    roomId?: string;
+    messageId?: string;
+    messageExcerpt?: string;
+    category: ReportCategory;
+    reason: string;
+  }
+): Promise<void> {
+  const err = validateReportInput(input);
+  if (err) throw new Error(err);
+
+  const path = 'user_reports';
+  try {
+    await addDoc(collection(db, 'user_reports'), {
+      classId: CLASS_ID,
+      reporterId: actor.uid,
+      reporterName: (actor.nickname || actor.displayName).slice(0, 80),
+      targetUid: input.targetUid.slice(0, 128),
+      targetName: input.targetName.trim().slice(0, 80) || 'Anggota',
+      roomId: (input.roomId ?? '').slice(0, 128),
+      messageId: (input.messageId ?? '').slice(0, 128),
+      messageExcerpt: (input.messageExcerpt ?? '').slice(0, 300),
+      category: input.category,
+      reason: input.reason.trim().slice(0, 500),
+      status: 'menunggu',
+      resolutionNote: '',
+      resolvedBy: '',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    await recordActivityLog(
+      actor,
+      'Kirim Laporan Moderasi',
+      'user_reports',
+      `Melaporkan ${input.targetName} (${input.category})`
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function resolveUserReport(
+  actor: UserPublic,
+  reportId: string,
+  status: ReportStatus,
+  resolutionNote: string
+): Promise<void> {
+  if (actor.role !== 'owner' && actor.role !== 'admin') {
+    throw new Error('Hanya Owner atau Admin yang dapat menindaklanjuti laporan.');
+  }
+  const path = `user_reports/${reportId}`;
+  try {
+    await updateDoc(doc(db, 'user_reports', reportId), {
+      status,
+      resolutionNote: resolutionNote.trim().slice(0, 300),
+      resolvedBy: (actor.nickname || actor.displayName).slice(0, 80),
+      updatedAt: serverTimestamp(),
+    });
+    await recordActivityLog(actor, 'Tindak Laporan Moderasi', 'user_reports', `${reportId} (${status})`);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+// --- Admin Messages ---
 export async function sendAdminMessage(
   actor: UserPublic,
   input: { category: AdminMessageCategory; subject: string; message: string }
@@ -896,6 +1668,11 @@ export async function saveClassSettings(
       ...settings,
       classId: CLASS_ID,
       weeklyKasTarget: Math.max(0, Math.round(settings.weeklyKasTarget)),
+      whatsappGroupUrl: (settings.whatsappGroupUrl || OFFICIAL_WHATSAPP_GROUP_URL).trim().slice(0, 300),
+      allowGameCenter: settings.allowGameCenter ?? true,
+      allowVoiceNotes: settings.allowVoiceNotes ?? true,
+      allowMediaUpload: settings.allowMediaUpload ?? true,
+      allowPrivateChat: settings.allowPrivateChat ?? true,
       updatedAt: serverTimestamp(),
     });
     await recordActivityLog(actor, 'Ubah Pengaturan Kelas', 'settings', 'Menyimpan konfigurasi Kelas 6A');
@@ -904,7 +1681,11 @@ export async function saveClassSettings(
   }
 }
 
-export async function checkFirebaseConnectionLatency(): Promise<{ ok: boolean; latencyMs: number; message: string }> {
+export async function checkFirebaseConnectionLatency(): Promise<{
+  ok: boolean;
+  latencyMs: number;
+  message: string;
+}> {
   const start = performance.now();
   try {
     await getDocFromServer(doc(db, 'settings', 'class_config'));

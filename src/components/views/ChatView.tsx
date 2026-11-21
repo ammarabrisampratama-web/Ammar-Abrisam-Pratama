@@ -1,461 +1,482 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Loader2, MessageSquare, Search, Send, Sparkles, Terminal, Trash2, X } from 'lucide-react';
-import { deleteChatMessage, sendChatMessage } from '../../services/firestoreService';
-import type { ChatMessage, UserPublic } from '../../types';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  buildSanitizedC6AContextSummary,
-  canUseC6ABot,
-  type C6AClassContextData,
-  extractChatBotQuery,
-  runC6ABotCommand,
-} from '../../utils/c6aBot';
-import { formatTimeOnly, getRoleLabel, getUserDisplayLabel, isAdminOrOwnerRole } from '../../utils/validation';
-import { ConfirmModal } from '../ConfirmModal';
+  Gamepad2,
+  Loader2,
+  MessageSquare,
+  MessageSquarePlus,
+  Search,
+  Users,
+  X,
+} from 'lucide-react';
+import { ensureDmRoom, ensureSystemChatRoom } from '../../services/firestoreService';
+import type {
+  ChatMessage,
+  ChatRoom,
+  ClassSettings,
+  UserPresence,
+  UserPublic,
+} from '../../types';
+import type { C6AClassContextData } from '../../utils/c6aBot';
+import { GAME_CATALOG, GAME_ROOM_IDS } from '../../utils/mediaUtils';
+import {
+  DEFAULT_CLASS_SETTINGS,
+  formatRelativeLastSeen,
+  formatTimeOnly,
+  getRoleLabel,
+  getUserDisplayLabel,
+  toMillis,
+} from '../../utils/validation';
+import { ChatRoomPane } from '../chat/ChatRoomPane';
 
 interface ChatViewProps {
   profile: UserPublic;
   messages: ChatMessage[];
   botContext?: C6AClassContextData;
   onOpenC6AAssistant?: () => void;
+  settings?: ClassSettings;
+  members?: UserPublic[];
+  chatRooms?: ChatRoom[];
+  presenceMap?: Map<string, UserPresence>;
+  blockedUids?: Set<string>;
+  initialRoomId?: string | null;
+  onClearInitialRoomId?: () => void;
 }
 
-interface EphemeralBotReply {
-  id: string;
-  source: 'bot' | 'ai';
-  prompt: string;
-  text: string;
-  timeLabel: string;
-  isError?: boolean;
-}
+type RoomCategoryFilter = 'semua' | 'dm' | 'group' | 'game';
 
 export function ChatView({
   profile,
   messages,
   botContext,
   onOpenC6AAssistant,
+  settings = { ...DEFAULT_CLASS_SETTINGS, updatedAt: null },
+  members = [],
+  chatRooms = [],
+  presenceMap = new Map(),
+  blockedUids = new Set(),
+  initialRoomId,
+  onClearInitialRoomId,
 }: ChatViewProps) {
-  const [text, setText] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sending, setSending] = useState(false);
-  const [botThinking, setBotThinking] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ChatMessage | null>(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [botReplies, setBotReplies] = useState<EphemeralBotReply[]>([]);
-
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const lastSentMsRef = useRef<number>(0);
-
-  const filteredMessages = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return messages;
-    return messages.filter(
-      (m) => m.text.toLowerCase().includes(q) || m.senderName.toLowerCase().includes(q)
-    );
-  }, [messages, searchQuery]);
+  const [selectedRoomId, setSelectedRoomId] = useState<string>(initialRoomId || 'kelas-6a');
+  const [mobileShowPane, setMobileShowPane] = useState<boolean>(Boolean(initialRoomId));
+  const [filterType, setFilterType] = useState<RoomCategoryFilter>('semua');
+  const [roomSearch, setRoomSearch] = useState('');
+  const [dmModalOpen, setDmModalOpen] = useState(false);
+  const [dmSearch, setDmSearch] = useState('');
+  const [startingDmUid, setStartingDmUid] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!searchQuery.trim()) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    void ensureSystemChatRoom('kelas-6a', profile);
+  }, [profile]);
+
+  useEffect(() => {
+    if (initialRoomId) {
+      setSelectedRoomId(initialRoomId);
+      setMobileShowPane(true);
+      onClearInitialRoomId?.();
     }
-  }, [messages.length, botReplies.length, botThinking, searchQuery]);
+  }, [initialRoomId, onClearInitialRoomId]);
 
-  const botAllowed = canUseC6ABot(profile.role);
+  // Ensure default system rooms always exist in sidebar
+  const combinedRooms = useMemo<ChatRoom[]>(() => {
+    const map = new Map<string, ChatRoom>();
 
-  const handleBotTrigger = async (submittedText: string) => {
-    if (!botContext) return;
-    const extracted = extractChatBotQuery(submittedText, profile.role);
-    if (!extracted.isBotTrigger) return;
+    const latestLegacy = messages[messages.length - 1];
+    map.set('kelas-6a', {
+      id: 'kelas-6a',
+      roomId: 'kelas-6a',
+      classId: '6A',
+      type: 'class',
+      name: 'Grup Utama Kelas 6A',
+      description: 'Diskusi resmi seluruh siswa, Admin, dan Wali Kelas 6A.',
+      gameId: '',
+      participantIds: [],
+      pinnedMessageId: '',
+      pinnedText: '',
+      pinnedByName: '',
+      lastMessageText: latestLegacy?.text || 'Ruang obrolan resmi Kelas 6A',
+      lastMessageSenderId: latestLegacy?.senderId || '',
+      lastMessageAt: latestLegacy?.createdAt ?? null,
+      createdBy: 'system',
+      updatedAt: null,
+    });
 
-    const nowLabel = new Intl.DateTimeFormat('id-ID', {
-      timeZone: 'Asia/Jakarta',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date());
-
-    if (extracted.mode === 'bot') {
-      const botRes = runC6ABotCommand(extracted.queryText, botContext, profile.role);
-      setBotReplies((prev) => [
-        ...prev.slice(-4),
-        {
-          id: `c6a-bot-${Date.now()}`,
-          source: 'bot',
-          prompt: submittedText,
-          text: botRes.reply,
-          timeLabel: nowLabel,
-        },
-      ]);
-      return;
-    }
-
-    setBotThinking(true);
-    const replyId = `c6a-ai-${Date.now()}`;
-    try {
-      const requestBody = {
-        message: extracted.queryText,
-        history: [],
-        contextSummary: buildSanitizedC6AContextSummary(botContext),
-        userLabel: getUserDisplayLabel(profile),
-        userRole: profile.role,
-      };
-
-      let res = await fetch('/api/c6a/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...requestBody,
-          stream: true,
-        }),
+    for (const g of GAME_CATALOG) {
+      const gid = GAME_ROOM_IDS[g.gameId];
+      map.set(gid, {
+        id: gid,
+        roomId: gid,
+        classId: '6A',
+        type: 'game',
+        name: `Chat Mabar ${g.shortName}`,
+        description: g.description,
+        gameId: g.gameId,
+        participantIds: [],
+        pinnedMessageId: '',
+        pinnedText: '',
+        pinnedByName: '',
+        lastMessageText: `Komunitas ${g.name}`,
+        lastMessageSenderId: '',
+        lastMessageAt: null,
+        createdBy: 'system',
+        updatedAt: null,
       });
-
-      if (res.status === 504 || res.status === 502) {
-        res = await fetch('/api/c6a/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...requestBody,
-            stream: false,
-            fastMode: true,
-          }),
-        });
-      }
-
-      const contentType = res.headers.get('content-type') || '';
-      if (!res.ok || !contentType.includes('text/event-stream') || !res.body) {
-        const rawText = await res.text().catch(() => '');
-        let payload: { reply?: string; error?: string } = {};
-        if (rawText) {
-          try {
-            payload = JSON.parse(rawText) as { reply?: string; error?: string };
-          } catch {
-            payload = {};
-          }
-        }
-        if (!res.ok || !payload.reply) {
-          const fallbackMsg =
-            res.status === 504
-              ? 'Server C6A AI v1 melebihi batas waktu respon (HTTP 504). Silakan coba kirim ulang pesan yang lebih singkat.'
-              : res.status >= 500
-                ? `Gagal menghubungi C6A AI v1 (HTTP ${res.status}). Pastikan endpoint /api/c6a/chat sudah terdeploy dan GEMINI_API_KEY sudah diisi di Variabel Lingkungan server.`
-                : `Gagal menghubungi C6A AI v1 (HTTP ${res.status}).`;
-          throw new Error(payload.error || fallbackMsg);
-        }
-        setBotReplies((prev) => [
-          ...prev.slice(-4),
-          {
-            id: replyId,
-            source: 'ai',
-            prompt: submittedText,
-            text: payload.reply!,
-            timeLabel: nowLabel,
-          },
-        ]);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullReply = '';
-      let inserted = false;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line.startsWith('data:')) continue;
-          const jsonStr = line.slice(5).trim();
-          if (!jsonStr) continue;
-
-          const evt = JSON.parse(jsonStr) as {
-            delta?: string;
-            error?: string;
-            done?: boolean;
-          };
-
-          if (evt.error) {
-            throw new Error(evt.error);
-          }
-
-          if (evt.delta) {
-            fullReply += evt.delta;
-            if (!inserted) {
-              inserted = true;
-              setBotThinking(false);
-              setBotReplies((prev) => [
-                ...prev.slice(-4),
-                {
-                  id: replyId,
-                  source: 'ai',
-                  prompt: submittedText,
-                  text: fullReply,
-                  timeLabel: nowLabel,
-                },
-              ]);
-            } else {
-              setBotReplies((prev) =>
-                prev.map((r) => (r.id === replyId ? { ...r, text: fullReply } : r))
-              );
-            }
-          }
-        }
-      }
-
-      if (!inserted) {
-        throw new Error('C6A AI v1 belum menerima teks jawaban dari model.');
-      }
-    } catch (err) {
-      setBotReplies((prev) => [
-        ...prev.slice(-4),
-        {
-          id: `c6a-err-${Date.now()}`,
-          source: 'ai',
-          prompt: submittedText,
-          text:
-            err instanceof Error
-              ? err.message
-              : 'Terjadi kendala saat meminta jawaban dari C6A AI.',
-          timeLabel: nowLabel,
-          isError: true,
-        },
-      ]);
-    } finally {
-      setBotThinking(false);
     }
+
+    for (const r of chatRooms) {
+      if (r.type === 'dm') {
+        if (!r.participantIds.includes(profile.uid)) continue;
+        const peerUid = r.participantIds.find((id) => id !== profile.uid);
+        if (peerUid && blockedUids.has(peerUid)) continue;
+      }
+      map.set(r.roomId || r.id, { ...r, roomId: r.roomId || r.id });
+    }
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.roomId === 'kelas-6a') return -1;
+      if (b.roomId === 'kelas-6a') return 1;
+      return toMillis(b.lastMessageAt) - toMillis(a.lastMessageAt);
+    });
+  }, [chatRooms, messages, profile.uid, blockedUids]);
+
+  const getRoomDisplayTitle = (room: ChatRoom): string => {
+    if (room.type === 'dm') {
+      const peerUid = room.participantIds.find((id) => id !== profile.uid);
+      const peer = members.find((m) => m.uid === peerUid);
+      if (peer) return getUserDisplayLabel(peer);
+    }
+    return room.name;
   };
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const submittedText = text.trim();
-    if (!submittedText || sending) return;
-    const now = Date.now();
-    if (now - lastSentMsRef.current < 2000) {
-      setErrorMsg('Tunggu 2 detik sebelum mengirim pesan berikutnya.');
-      return;
-    }
-
-    setErrorMsg(null);
-    setSending(true);
-    try {
-      await sendChatMessage(profile, submittedText);
-      lastSentMsRef.current = Date.now();
-      setText('');
-      void handleBotTrigger(submittedText);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Gagal mengirim pesan.');
-    } finally {
-      setSending(false);
-    }
+  const getDmPeer = (room: ChatRoom): UserPublic | undefined => {
+    if (room.type !== 'dm') return undefined;
+    const peerUid = room.participantIds.find((id) => id !== profile.uid);
+    return members.find((m) => m.uid === peerUid);
   };
 
-  const handleConfirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleteBusy(true);
+  const filteredRooms = useMemo(() => {
+    const q = roomSearch.trim().toLowerCase();
+    return combinedRooms.filter((r) => {
+      if (filterType === 'dm' && r.type !== 'dm') return false;
+      if (filterType === 'group' && r.type !== 'class' && r.type !== 'group') return false;
+      if (filterType === 'game' && r.type !== 'game') return false;
+      if (!q) return true;
+      const title = getRoomDisplayTitle(r).toLowerCase();
+      return title.includes(q) || r.lastMessageText.toLowerCase().includes(q);
+    });
+  }, [combinedRooms, filterType, roomSearch, members, profile.uid]);
+
+  const activeRoom =
+    combinedRooms.find((r) => r.roomId === selectedRoomId) ?? combinedRooms[0];
+
+  const dmCandidates = useMemo(() => {
+    const q = dmSearch.trim().toLowerCase();
+    return members
+      .filter(
+        (m) =>
+          m.uid !== profile.uid &&
+          m.status === 'aktif' &&
+          !blockedUids.has(m.uid)
+      )
+      .filter(
+        (m) =>
+          !q ||
+          m.displayName.toLowerCase().includes(q) ||
+          m.nickname.toLowerCase().includes(q)
+      );
+  }, [members, profile.uid, blockedUids, dmSearch]);
+
+  const handleStartDm = async (target: UserPublic) => {
+    setStartingDmUid(target.uid);
     try {
-      await deleteChatMessage(deleteTarget.id);
-      setDeleteTarget(null);
+      const dmRoomId = await ensureDmRoom(profile, target);
+      setSelectedRoomId(dmRoomId);
+      setMobileShowPane(true);
+      setDmModalOpen(false);
     } finally {
-      setDeleteBusy(false);
+      setStartingDmUid(null);
     }
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-12rem)] lg:h-[calc(100vh-8.5rem)] bg-white border border-[#D3E6D8] rounded-2xl overflow-hidden">
-      <div className="px-4 sm:px-5 py-3.5 bg-[#F0F7F2] border-b border-[#E2EFE6] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-2.5">
-          <MessageSquare className="w-5 h-5 text-[#0B6B3A]" />
-          <div>
-            <h2 className="text-base font-bold text-[#0B2416]">Chat Kelas 6A</h2>
-            <p className="text-xs text-[#52705E]">
-              {botAllowed
-                ? 'Diskusi kelas · Ketik /rekap, /jadwal, /tugas, atau @C6A untuk panggil asisten.'
-                : 'Diskusi kelas · Ketik @C6A <pertanyaan> untuk tanya C6A AI v1.'}
-            </p>
+    <div className="h-[calc(100vh-11.5rem)] lg:h-[calc(100vh-8rem)] min-h-[520px] grid grid-cols-1 md:grid-cols-12 gap-4">
+      {/* Left Sidebar: Daftar Percakapan */}
+      <aside
+        className={`${
+          mobileShowPane ? 'hidden md:flex' : 'flex'
+        } md:col-span-4 lg:col-span-4 flex-col bg-white dark:bg-[#0F2419] border border-[#D3E6D8] dark:border-emerald-900/60 rounded-2xl overflow-hidden shadow-sm`}
+      >
+        <div className="p-3.5 bg-[#F0F7F2] dark:bg-[#132C1E] border-b border-[#E2EFE6] dark:border-emerald-900/60 space-y-2.5 shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <MessageSquare className="w-5 h-5 text-[#0B6B3A] dark:text-emerald-400 shrink-0" />
+              <h2 className="text-sm font-bold text-[#0B2416] dark:text-emerald-50 truncate">
+                Percakapan Kelas 6A
+              </h2>
+            </div>
+
+            {settings.allowPrivateChat !== false && (
+              <button
+                type="button"
+                onClick={() => setDmModalOpen(true)}
+                className="min-h-[34px] px-2.5 py-1 rounded-xl bg-[#0B6B3A] hover:bg-[#09562E] text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <MessageSquarePlus className="w-3.5 h-3.5" />
+                <span>DM Baru</span>
+              </button>
+            )}
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {onOpenC6AAssistant && (
-            <button
-              type="button"
-              onClick={onOpenC6AAssistant}
-              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white hover:bg-[#E6F4EC] border border-[#96CCA9] text-xs font-semibold text-[#0B6B3A] flex items-center gap-1.5 shrink-0 cursor-pointer"
-            >
-              <Bot className="w-3.5 h-3.5" />
-              <span>{botAllowed ? 'Bot & AI C6A v1' : 'C6A AI v1'}</span>
-            </button>
-          )}
-
-          <div className="relative flex-1 sm:w-56">
-            <Search className="w-3.5 h-3.5 text-[#52705E] absolute left-3 top-1/2 -translate-y-1/2" />
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-[#52705E] dark:text-emerald-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Cari isi chat..."
-              aria-label="Cari pesan chat kelas"
-              className="w-full min-h-[38px] pl-9 pr-3 rounded-xl bg-white border border-[#B9D8C2] text-xs text-[#0B2416] placeholder:text-[#6E8B79] focus:outline-none focus:border-[#0B6B3A]"
+              value={roomSearch}
+              onChange={(e) => setRoomSearch(e.target.value)}
+              placeholder="Cari ruang chat atau teman..."
+              className="w-full min-h-[36px] pl-8 pr-3 rounded-xl bg-white dark:bg-[#0D1E15] border border-[#B9D8C2] dark:border-emerald-800 text-xs text-[#0B2416] dark:text-emerald-50 placeholder:text-[#6E8B79]"
             />
           </div>
-        </div>
-      </div>
 
-      <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3 bg-[#F8FCF9]">
-        {filteredMessages.length === 0 && botReplies.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center text-[#52705E] space-y-1">
-            <MessageSquare className="w-8 h-8 text-[#96CCA9]" />
-            <p className="text-sm font-medium text-[#2F4F3C]">
-              {searchQuery.trim() ? 'Tidak ada pesan yang cocok.' : 'Belum ada percakapan di ruang kelas.'}
-            </p>
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+            {(
+              [
+                { id: 'semua', label: 'Semua' },
+                { id: 'group', label: 'Grup' },
+                { id: 'dm', label: 'Pribadi' },
+                { id: 'game', label: 'Game' },
+              ] as const
+            ).map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                onClick={() => setFilterType(f.id)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
+                  filterType === f.id
+                    ? 'bg-[#0B6B3A] text-white'
+                    : 'bg-white dark:bg-[#0D1E15] text-[#2F4F3C] dark:text-emerald-200 border border-[#D3E6D8] dark:border-emerald-800'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
           </div>
-        ) : (
-          filteredMessages.map((msg) => {
-            const isMine = msg.senderId === profile.uid;
-            const canDelete = isMine || isAdminOrOwnerRole(profile.role);
+        </div>
 
-            return (
-              <div key={msg.id} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
-                <div
-                  className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-2.5 border ${
-                    isMine
-                      ? 'bg-[#0B6B3A] border-[#0B6B3A] text-white'
-                      : 'bg-white border-[#D3E6D8] text-[#0B2416]'
+        <div className="flex-1 overflow-y-auto divide-y divide-[#E6F2EA] dark:divide-emerald-900/50">
+          {filteredRooms.length === 0 ? (
+            <p className="p-6 text-center text-xs text-[#52705E] dark:text-emerald-300/80">
+              Tidak ada percakapan ditemukan.
+            </p>
+          ) : (
+            filteredRooms.map((room) => {
+              const isSelected = activeRoom?.roomId === room.roomId;
+              const title = getRoomDisplayTitle(room);
+              const peer = getDmPeer(room);
+              const peerPres = peer ? presenceMap.get(peer.uid) : undefined;
+              const isOnline =
+                Boolean(peerPres?.isOnline) && !Boolean(peerPres?.hideOnlineStatus);
+              const hasNewFromOther =
+                Boolean(room.lastMessageSenderId) &&
+                room.lastMessageSenderId !== profile.uid &&
+                !isSelected;
+
+              return (
+                <button
+                  key={room.roomId}
+                  type="button"
+                  onClick={() => {
+                    setSelectedRoomId(room.roomId);
+                    setMobileShowPane(true);
+                  }}
+                  className={`w-full text-left px-3.5 py-3 flex items-center gap-3 transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'bg-[#E6F4EC] dark:bg-[#173A26]'
+                      : 'hover:bg-[#F7FBF8] dark:hover:bg-[#132C1E]'
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-3 text-[11px] mb-1">
-                    <span className={`font-semibold ${isMine ? 'text-emerald-100' : 'text-[#0B6B3A]'}`}>
-                      {msg.senderName}
-                      {msg.senderRole !== 'siswa' && (
-                        <span className={`font-normal ${isMine ? 'text-amber-200' : 'text-amber-700'}`}>
-                          {' '}· {getRoleLabel(msg.senderRole)}
-                        </span>
-                      )}
-                    </span>
-                    <span className={`font-mono-num ${isMine ? 'text-emerald-100/80' : 'text-[#52705E]'}`}>
-                      {formatTimeOnly(msg.createdAt)}
-                    </span>
-                  </div>
-
-                  <div className="flex items-end justify-between gap-2">
-                    <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{msg.text}</p>
-                    {canDelete && (
-                      <button
-                        type="button"
-                        onClick={() => setDeleteTarget(msg)}
-                        aria-label="Hapus pesan"
-                        className={`p-1 shrink-0 cursor-pointer ${
-                          isMine
-                            ? 'text-emerald-100 hover:text-white'
-                            : 'text-[#52705E] hover:text-rose-600'
+                  <div className="relative shrink-0">
+                    {peer?.photoURL ? (
+                      <img
+                        src={peer.photoURL}
+                        alt={title}
+                        referrerPolicy="no-referrer"
+                        className="w-10 h-10 rounded-full object-cover border border-[#96CCA9]"
+                      />
+                    ) : (
+                      <div
+                        className={`w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold border ${
+                          room.type === 'game'
+                            ? 'bg-amber-50 dark:bg-amber-950/50 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-300'
+                            : room.type === 'dm'
+                              ? 'bg-sky-50 dark:bg-sky-950/50 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-300'
+                              : 'bg-[#E6F4EC] dark:bg-emerald-900/60 border-[#96CCA9] dark:border-emerald-700 text-[#0B6B3A] dark:text-emerald-200'
                         }`}
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                        {room.type === 'game' ? (
+                          <Gamepad2 className="w-4 h-4" />
+                        ) : room.type === 'dm' ? (
+                          title.slice(0, 2).toUpperCase()
+                        ) : (
+                          <Users className="w-4 h-4" />
+                        )}
+                      </div>
+                    )}
+                    {room.type === 'dm' && isOnline && (
+                      <span className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-500 border-2 border-white dark:border-[#0F2419]" />
                     )}
                   </div>
-                </div>
-              </div>
-            );
-          })
-        )}
 
-        {/* Inline C6A Bot & AI Responses */}
-        {botReplies.map((reply) => (
-          <div key={reply.id} className="flex flex-col items-start">
-            <div
-              className={`max-w-[90%] sm:max-w-[75%] rounded-2xl px-4 py-3 border ${
-                reply.isError
-                  ? 'bg-rose-50 border-rose-200 text-rose-900'
-                  : 'bg-[#EDF7F1] border-[#96CCA9] text-[#0B2416]'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-3 text-[11px] mb-1.5">
-                <span className="font-semibold flex items-center gap-1.5">
-                  {reply.source === 'bot' ? (
-                    <>
-                      <Terminal className="w-3.5 h-3.5 text-amber-700" />
-                      <span className="text-amber-800">Bot C6A v1</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-3.5 h-3.5 text-[#0B6B3A]" />
-                      <span className="text-[#0B6B3A]">C6A AI v1</span>
-                    </>
-                  )}
-                  <span className="text-[#52705E] font-normal">· Respons untuk Anda</span>
-                </span>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono-num text-[#52705E]">{reply.timeLabel}</span>
-                  <button
-                    type="button"
-                    onClick={() => setBotReplies((prev) => prev.filter((r) => r.id !== reply.id))}
-                    aria-label="Tutup balasan C6A"
-                    className="text-[#52705E] hover:text-[#0B2416] cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-              <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{reply.text}</p>
-            </div>
-          </div>
-        ))}
-
-        {botThinking && (
-          <div className="flex items-start">
-            <div className="rounded-2xl px-4 py-2.5 bg-[#EDF7F1] border border-[#96CCA9] text-xs font-medium text-[#0B6B3A] flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>C6A AI sedang menyiapkan jawaban...</span>
-            </div>
-          </div>
-        )}
-
-        <div ref={bottomRef} />
-      </div>
-
-      <form onSubmit={handleSend} className="p-3 sm:p-4 border-t border-[#E2EFE6] bg-[#F0F7F2] shrink-0 space-y-2">
-        {errorMsg && <p className="text-xs text-rose-700 px-1">{errorMsg}</p>}
-        <div className="flex items-center gap-2.5">
-          <input
-            type="text"
-            maxLength={1000}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={
-              botAllowed
-                ? 'Tulis pesan, /rekap, /jadwal, /tugas, atau @C6A <pertanyaan>...'
-                : 'Tulis pesan atau @C6A <pertanyaan> untuk tanya C6A AI v1...'
-            }
-            aria-label="Tulis pesan chat kelas"
-            className="flex-1 min-h-[44px] px-4 rounded-xl bg-white border border-[#B9D8C2] text-sm text-[#0B2416] placeholder:text-[#6E8B79] focus:outline-none focus:border-[#0B6B3A]"
-          />
-          <button
-            type="submit"
-            disabled={sending || !text.trim()}
-            aria-label="Kirim pesan"
-            className="min-h-[44px] px-4 rounded-xl bg-[#0B6B3A] hover:bg-[#09562E] disabled:opacity-50 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer shrink-0"
-          >
-            <Send className="w-4 h-4" />
-            <span className="hidden sm:inline">Kirim</span>
-          </button>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs sm:text-sm font-bold text-[#0B2416] dark:text-emerald-50 truncate">
+                        {title}
+                      </p>
+                      <span className="font-mono-num text-[10px] text-[#52705E] dark:text-emerald-400 shrink-0">
+                        {room.lastMessageAt ? formatTimeOnly(room.lastMessageAt) : ''}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 mt-0.5">
+                      <p className="text-[11px] text-[#52705E] dark:text-emerald-300/80 truncate">
+                        {room.lastMessageText || room.description}
+                      </p>
+                      {hasNewFromOther && (
+                        <span
+                          className="w-2.5 h-2.5 rounded-full bg-[#25D366] shrink-0"
+                          title="Pesan baru"
+                        />
+                      )}
+                    </div>
+                  </div>
+                </button>
+              );
+            })
+          )}
         </div>
-      </form>
+      </aside>
 
-      <ConfirmModal
-        open={Boolean(deleteTarget)}
-        title="Hapus Pesan Chat?"
-        description="Yakin ingin menghapus pesan ini dari ruang chat kelas?"
-        confirmLabel="Hapus Pesan"
-        onConfirm={handleConfirmDelete}
-        onCancel={() => setDeleteTarget(null)}
-        busy={deleteBusy}
-      />
+      {/* Right Pane: Ruang Chat Aktif */}
+      <section
+        className={`${
+          mobileShowPane ? 'flex' : 'hidden md:flex'
+        } md:col-span-8 lg:col-span-8 flex-col min-h-0`}
+      >
+        {activeRoom ? (
+          <ChatRoomPane
+            room={activeRoom}
+            profile={profile}
+            settings={settings}
+            members={members}
+            presenceMap={presenceMap}
+            blockedUids={blockedUids}
+            allRooms={combinedRooms}
+            legacyClassMessages={activeRoom.roomId === 'kelas-6a' ? messages : undefined}
+            botContext={botContext}
+            onBackMobile={() => setMobileShowPane(false)}
+            onOpenC6AAssistant={onOpenC6AAssistant}
+            onForwardSuccess={(targetRoomId) => {
+              setSelectedRoomId(targetRoomId);
+              setMobileShowPane(true);
+            }}
+          />
+        ) : (
+          <div className="flex-1 bg-white dark:bg-[#0F2419] border border-[#D3E6D8] dark:border-emerald-900/60 rounded-2xl flex items-center justify-center text-sm text-[#52705E]">
+            Pilih ruang chat untuk memulai percakapan.
+          </div>
+        )}
+      </section>
+
+      {/* Modal Mulai Chat Pribadi (DM) */}
+      {dmModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div
+            className="fixed inset-0 bg-[#0B2416]/50 backdrop-blur-sm"
+            onClick={() => setDmModalOpen(false)}
+            aria-hidden="true"
+          />
+          <div className="relative z-10 max-w-md w-full bg-white dark:bg-[#0F2419] border border-[#D3E6D8] dark:border-emerald-800 rounded-2xl overflow-hidden shadow-xl">
+            <div className="p-4 border-b border-[#E2EFE6] dark:border-emerald-900/60 flex items-center justify-between">
+              <h3 className="text-sm sm:text-base font-bold text-[#0B2416] dark:text-emerald-50">
+                Mulai Chat Pribadi Antarsiswa
+              </h3>
+              <button
+                type="button"
+                onClick={() => setDmModalOpen(false)}
+                className="p-1.5 rounded-lg text-[#52705E] hover:text-[#0B2416] dark:text-emerald-300 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 border-b border-[#E6F2EA] dark:border-emerald-900/60">
+              <input
+                type="search"
+                autoFocus
+                value={dmSearch}
+                onChange={(e) => setDmSearch(e.target.value)}
+                placeholder="Cari nama teman atau wali kelas..."
+                className="w-full min-h-[40px] px-3.5 rounded-xl bg-[#F8FCF9] dark:bg-[#0D1E15] border border-[#B9D8C2] dark:border-emerald-800 text-xs sm:text-sm text-[#0B2416] dark:text-emerald-50"
+              />
+            </div>
+
+            <div className="max-h-80 overflow-y-auto divide-y divide-[#E6F2EA] dark:divide-emerald-900/50">
+              {dmCandidates.length === 0 ? (
+                <p className="p-6 text-center text-xs text-[#52705E] dark:text-emerald-300/80">
+                  Tidak ada teman kelas lain yang tersedia.
+                </p>
+              ) : (
+                dmCandidates.map((m) => {
+                  const pres = presenceMap.get(m.uid);
+                  const statusText = formatRelativeLastSeen(
+                    pres?.lastSeenAt ?? null,
+                    Boolean(pres?.isOnline),
+                    Boolean(pres?.hideOnlineStatus)
+                  );
+                  return (
+                    <button
+                      key={m.uid}
+                      type="button"
+                      disabled={startingDmUid === m.uid}
+                      onClick={() => void handleStartDm(m)}
+                      className="w-full px-4 py-3 text-left hover:bg-[#F0F7F2] dark:hover:bg-[#132C1E] flex items-center justify-between gap-3 cursor-pointer"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        {m.photoURL ? (
+                          <img
+                            src={m.photoURL}
+                            alt={getUserDisplayLabel(m)}
+                            referrerPolicy="no-referrer"
+                            className="w-9 h-9 rounded-full object-cover border border-[#96CCA9] shrink-0"
+                          />
+                        ) : (
+                          <div className="w-9 h-9 rounded-full bg-[#E6F4EC] dark:bg-emerald-900/60 border border-[#96CCA9] flex items-center justify-center text-xs font-bold text-[#0B6B3A] dark:text-emerald-200 shrink-0">
+                            {getUserDisplayLabel(m).slice(0, 2).toUpperCase()}
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <p className="text-xs sm:text-sm font-bold text-[#0B2416] dark:text-emerald-50 truncate">
+                            {getUserDisplayLabel(m)}
+                          </p>
+                          <p className="text-[11px] text-[#52705E] dark:text-emerald-300/80 truncate">
+                            {getRoleLabel(m.role)} · {statusText}
+                          </p>
+                        </div>
+                      </div>
+                      {startingDmUid === m.uid ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-[#0B6B3A] shrink-0" />
+                      ) : (
+                        <span className="text-xs font-bold text-[#0B6B3A] dark:text-emerald-400 shrink-0">
+                          Chat
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

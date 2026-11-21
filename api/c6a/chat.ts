@@ -4,6 +4,7 @@ import { type GenerateContentResponse, GoogleGenAI, ThinkingLevel } from '@googl
 
 const MODEL_NAME = 'gemini-4-hydrogen';
 const FALLBACK_MODEL_NAME = 'gemini-3.1-flash-lite';
+const EMERGENCY_FALLBACK_MODEL_NAME = 'gemini-2.5-flash';
 
 interface VercelNodeRequest extends IncomingMessage {
   body?: unknown;
@@ -187,6 +188,19 @@ function mapGeminiError(error: unknown): { status: number; message: string } {
       message: `Model C6A AI v1 (${MODEL_NAME}) belum tersedia pada kunci API saat ini (HTTP 404).`,
     };
   }
+  if (
+    status === 503 ||
+    upper.includes('UNAVAILABLE') ||
+    upper.includes('HIGH DEMAND') ||
+    upper.includes('OVERLOADED')
+  ) {
+    console.warn(`Vercel C6A AI v1 Upstream Busy (HTTP 503): ${sanitizeErrorDetail(error)}`);
+    return {
+      status: 503,
+      message:
+        'Server model Gemini sedang mengalami lonjakan permintaan sementara (HTTP 503). Silakan coba kirim ulang beberapa detik lagi.',
+    };
+  }
   const detail = sanitizeErrorDetail(error);
   console.error('Vercel C6A AI v1 Error:', detail);
   return {
@@ -350,22 +364,44 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
     };
 
     const attempts: Array<{ model: string; timeoutMs: number }> = fastMode
-      ? [{ model: FALLBACK_MODEL_NAME, timeoutMs: 8000 }]
+      ? [
+          { model: FALLBACK_MODEL_NAME, timeoutMs: 3500 },
+          { model: EMERGENCY_FALLBACK_MODEL_NAME, timeoutMs: 4500 },
+        ]
       : [
-          { model: MODEL_NAME, timeoutMs: 4000 },
-          { model: FALLBACK_MODEL_NAME, timeoutMs: 4500 },
+          { model: MODEL_NAME, timeoutMs: 2800 },
+          { model: FALLBACK_MODEL_NAME, timeoutMs: 2800 },
+          { model: EMERGENCY_FALLBACK_MODEL_NAME, timeoutMs: 3000 },
         ];
 
     if (wantsStream) {
-      let streamResponse: AsyncIterable<unknown> | undefined;
+      let startedStream:
+        | { firstText: string; iterator: AsyncIterator<unknown> }
+        | undefined;
       let modelUsed = MODEL_NAME;
       let lastErr: unknown;
 
       for (const attempt of attempts) {
         try {
-          streamResponse = await runWithTimeout(attempt.timeoutMs, async (signal) => {
+          startedStream = await runWithTimeout(attempt.timeoutMs, async (signal) => {
             const chat = createChatFor(attempt.model, signal);
-            return chat.sendMessageStream({ message: rawMessage });
+            const rawStream = await chat.sendMessageStream({ message: rawMessage });
+            const iterator = rawStream[Symbol.asyncIterator]();
+            let firstText = '';
+            while (true) {
+              const step = await iterator.next();
+              if (step.done) break;
+              const c = step.value as GenerateContentResponse;
+              const delta = c.text ?? '';
+              if (delta) {
+                firstText = delta;
+                break;
+              }
+            }
+            if (!firstText) {
+              throw Object.assign(new Error('Empty stream response from model'), { status: 503 });
+            }
+            return { firstText, iterator };
           });
           modelUsed = attempt.model;
           break;
@@ -379,7 +415,7 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
         }
       }
 
-      if (!streamResponse) {
+      if (!startedStream) {
         const mapped = mapGeminiError(lastErr);
         sendJson(res, mapped.status, { error: mapped.message });
         return;
@@ -399,29 +435,21 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
       });
 
       try {
-        let emittedChars = 0;
+        res.write(`data: ${JSON.stringify({ delta: startedStream.firstText })}\n\n`);
 
-        for await (const chunk of streamResponse) {
+        while (!aborted) {
+          const step = await startedStream.iterator.next();
+          if (step.done) break;
           if (aborted) break;
-          const c = chunk as GenerateContentResponse;
+          const c = step.value as GenerateContentResponse;
           const delta = c.text ?? '';
           if (delta) {
-            emittedChars += delta.length;
             res.write(`data: ${JSON.stringify({ delta })}\n\n`);
           }
         }
 
         if (!aborted) {
-          if (emittedChars === 0) {
-            res.write(
-              `data: ${JSON.stringify({
-                error:
-                  'C6A AI v1 belum menerima teks jawaban dari model. Silakan coba ulangi pertanyaan.',
-              })}\n\n`
-            );
-          } else {
-            res.write(`data: ${JSON.stringify({ done: true, model: modelUsed })}\n\n`);
-          }
+          res.write(`data: ${JSON.stringify({ done: true, model: modelUsed })}\n\n`);
           res.end();
         }
       } catch (error) {
@@ -443,7 +471,11 @@ export default async function handler(req: VercelNodeRequest, res: ServerRespons
         try {
           response = await runWithTimeout(attempt.timeoutMs, async (signal) => {
             const chat = createChatFor(attempt.model, signal);
-            return chat.sendMessage({ message: rawMessage });
+            const resMsg = await chat.sendMessage({ message: rawMessage });
+            if (!(resMsg.text ?? '').trim()) {
+              throw Object.assign(new Error('Empty response from model'), { status: 503 });
+            }
+            return resMsg;
           });
           modelUsed = attempt.model;
           break;

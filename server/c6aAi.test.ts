@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { GenerateContentResponse, GoogleGenAI } from '@google/genai';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
+  EMERGENCY_FALLBACK_MODEL_NAME,
   FALLBACK_MODEL_NAME,
   MODEL_NAME,
   isTransientOrModelError,
@@ -29,7 +30,7 @@ function makeParsedRequest(fastMode = false, wantsStream = false) {
   return parsed.data;
 }
 
-test('startC6AStreamWithFallback falls back immediately from gemini-4-hydrogen timeout/AbortError to gemini-3.1-flash-lite in 2 attempts', async () => {
+test('startC6AStreamWithFallback falls back from gemini-4-hydrogen -> gemini-3.1-flash-lite -> gemini-2.5-flash including mid-stream 503 before first token', async () => {
   const attemptedModels: string[] = [];
   const fakeAi = {
     chats: {
@@ -39,14 +40,24 @@ test('startC6AStreamWithFallback falls back immediately from gemini-4-hydrogen t
         return {
           sendMessageStream: async () => {
             if (model === MODEL_NAME) {
-              const err = new Error('Request timeout after 4000ms');
+              const err = new Error('Request timeout after 2800ms');
               err.name = 'AbortError';
               throw err;
             }
-            async function* gen() {
-              yield { text: 'Waalaikumsalam! Ada yang bisa saya bantu?' };
+            if (model === FALLBACK_MODEL_NAME) {
+              async function* failingGen() {
+                if (model === FALLBACK_MODEL_NAME) {
+                  throw Object.assign(new Error('This model is currently experiencing high demand'), { status: 503 });
+                }
+                yield { text: 'unreachable' };
+              }
+              return failingGen();
             }
-            return gen();
+            async function* okGen() {
+              yield { text: 'Waalaikumsalam! ' };
+              yield { text: 'Ada yang bisa saya bantu?' };
+            }
+            return okGen();
           },
         };
       },
@@ -54,17 +65,17 @@ test('startC6AStreamWithFallback falls back immediately from gemini-4-hydrogen t
   } as unknown as GoogleGenAI;
 
   const result = await startC6AStreamWithFallback(fakeAi, makeParsedRequest(false, true));
-  assert.deepEqual(attemptedModels, [MODEL_NAME, FALLBACK_MODEL_NAME]);
-  assert.equal(result.modelUsed, FALLBACK_MODEL_NAME);
+  assert.deepEqual(attemptedModels, [MODEL_NAME, FALLBACK_MODEL_NAME, EMERGENCY_FALLBACK_MODEL_NAME]);
+  assert.equal(result.modelUsed, EMERGENCY_FALLBACK_MODEL_NAME);
 
   let collected = '';
   for await (const chunk of result.stream) {
     collected += (chunk as GenerateContentResponse).text ?? '';
   }
-  assert.match(collected, /Waalaikumsalam/);
+  assert.equal(collected, 'Waalaikumsalam! Ada yang bisa saya bantu?');
 });
 
-test('startC6AStreamWithFallback uses gemini-3.1-flash-lite directly in 1 attempt when fastMode=true', async () => {
+test('startC6AStreamWithFallback uses gemini-3.1-flash-lite first in 1 attempt when fastMode=true', async () => {
   const attemptedModels: string[] = [];
   const fakeAi = {
     chats: {
@@ -110,7 +121,7 @@ test('sendC6AMessageWithFallback stops immediately on HTTP 401 without fallback'
   assert.deepEqual(attemptedModels, [MODEL_NAME]);
 });
 
-test('sendC6AMessageWithFallback skips primary in fastMode=true and succeeds in 1 attempt', async () => {
+test('sendC6AMessageWithFallback skips primary in fastMode=true and falls back to gemini-2.5-flash on 503', async () => {
   const attemptedModels: string[] = [];
   const fakeAi = {
     chats: {
@@ -118,29 +129,35 @@ test('sendC6AMessageWithFallback skips primary in fastMode=true and succeeds in 
         attemptedModels.push(model);
         assert.equal(config?.thinkingConfig, undefined);
         return {
-          sendMessage: async () => ({ text: 'Halo Ammar, saya C6A AI v1!' }) as GenerateContentResponse,
+          sendMessage: async () => {
+            if (model === FALLBACK_MODEL_NAME) {
+              throw Object.assign(new Error('This model is currently experiencing high demand'), { status: 503 });
+            }
+            return { text: 'Halo Ammar, saya C6A AI v1!' } as GenerateContentResponse;
+          },
         };
       },
     },
   } as unknown as GoogleGenAI;
 
   const result = await sendC6AMessageWithFallback(fakeAi, makeParsedRequest(true, false));
-  assert.deepEqual(attemptedModels, [FALLBACK_MODEL_NAME]);
-  assert.equal(result.modelUsed, FALLBACK_MODEL_NAME);
+  assert.deepEqual(attemptedModels, [FALLBACK_MODEL_NAME, EMERGENCY_FALLBACK_MODEL_NAME]);
+  assert.equal(result.modelUsed, EMERGENCY_FALLBACK_MODEL_NAME);
   assert.equal(result.response.text, 'Halo Ammar, saya C6A AI v1!');
 });
 
-test('isTransientOrModelError treats AbortError/TimeoutError/404/504 as fallback-eligible and 401/403/429 as fatal', () => {
+test('isTransientOrModelError treats AbortError/TimeoutError/404/503/504 as fallback-eligible and 401/403/429 as fatal', () => {
   const abortErr = new Error('Aborted');
   abortErr.name = 'AbortError';
   assert.equal(isTransientOrModelError(abortErr), true);
+  assert.equal(isTransientOrModelError(Object.assign(new Error('High demand'), { status: 503 })), true);
   assert.equal(isTransientOrModelError(Object.assign(new Error('Gateway timeout'), { status: 504 })), true);
   assert.equal(isTransientOrModelError(Object.assign(new Error('Not found'), { status: 404 })), true);
   assert.equal(isTransientOrModelError(Object.assign(new Error('Invalid key'), { status: 401 })), false);
   assert.equal(isTransientOrModelError(Object.assign(new Error('Quota'), { status: 429 })), false);
 });
 
-test('resolveGeminiApiKey strips prefixes/quotes and mapGeminiError redacts keys', () => {
+test('resolveGeminiApiKey strips prefixes/quotes and mapGeminiError maps 503 cleanly and redacts keys', () => {
   const prevKey = process.env.GEMINI_API_KEY;
   try {
     process.env.GEMINI_API_KEY = '  "GEMINI_API_KEY=AIzaSyTestKey1234567890"  ';
@@ -148,6 +165,10 @@ test('resolveGeminiApiKey strips prefixes/quotes and mapGeminiError redacts keys
 
     process.env.GEMINI_API_KEY = 'MY_GEMINI_API_KEY';
     assert.equal(resolveGeminiApiKey(), null);
+
+    const busyMapped = mapGeminiError(Object.assign(new Error('UNAVAILABLE: high demand'), { status: 503 }));
+    assert.equal(busyMapped.status, 503);
+    assert.match(busyMapped.message, /HTTP 503/);
 
     const mapped = mapGeminiError(new Error('Failure with AIzaSyTestKey1234567890'));
     assert.equal(mapped.status, 500);
