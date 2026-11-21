@@ -22,6 +22,13 @@ import firebaseConfig from '../firebase-applet-config.json';
 import { withRetry } from './utils/resilience';
 
 function resolveConfiguredAuthDomain(): string {
+  const proxyEnabled =
+    typeof import.meta !== 'undefined' &&
+    String(import.meta.env?.VITE_USE_AUTH_PROXY ?? '').trim().toLowerCase() === 'true';
+  if (!proxyEnabled) {
+    return firebaseConfig.authDomain;
+  }
+
   const raw =
     typeof import.meta !== 'undefined' && typeof import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN === 'string'
       ? import.meta.env.VITE_FIREBASE_AUTH_DOMAIN.trim()
