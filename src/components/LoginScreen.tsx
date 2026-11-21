@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { getRedirectResult, signInWithPopup, signOut } from 'firebase/auth';
+import { getRedirectResult, signInWithPopup, signInWithRedirect, signOut } from 'firebase/auth';
 import {
   AlertCircle,
   ArrowRight,
   Check,
   Copy,
+  HelpCircle,
   Lock,
   RefreshCw,
   ShieldCheck,
@@ -17,7 +18,6 @@ import { auth, googleProvider } from '../firebase';
 import {
   detectBrowserEnvironment,
   mapFirebaseAuthError,
-  withRetry,
 } from '../utils/resilience';
 import { CLASS_TITLE, SCHOOL_NAME, validateProfileInput } from '../utils/validation';
 import { CrestLogo } from './CrestLogo';
@@ -51,6 +51,7 @@ export function LoginScreen({
   const [studentAbsen, setStudentAbsen] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [suggestChromeBanner, setSuggestChromeBanner] = useState(false);
+  const [showMissingStateHelp, setShowMissingStateHelp] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(() =>
@@ -123,22 +124,43 @@ export function LoginScreen({
 
     setSigningIn(true);
     try {
-      await withRetry(
-        () => signInWithPopup(auth, googleProvider),
-        {
-          maxAttempts: 2,
-          baseDelayMs: 400,
-          shouldRetry: (err) => mapFirebaseAuthError(err).retryable,
-        }
-      );
+      await signInWithPopup(auth, googleProvider);
       onGoogleLoginSuccess(preferredStudent);
     } catch (error) {
       const mapped = mapFirebaseAuthError(error);
       setFormError(mapped.message);
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code).toLowerCase()
+          : '';
+      if (
+        mapped.suggestExternalBrowser ||
+        code.includes('popup-closed-by-user') ||
+        code.includes('missing-initial-state')
+      ) {
+        setShowMissingStateHelp(true);
+      }
       if (mapped.suggestExternalBrowser) {
         setSuggestChromeBanner(true);
       }
     } finally {
+      setSigningIn(false);
+    }
+  };
+
+  const handleGoogleRedirectSignIn = async () => {
+    setFormError(null);
+    if (!isOnline) {
+      setFormError('Perangkat sedang offline. Aktifkan Wi-Fi atau data seluler lalu coba masuk kembali.');
+      return;
+    }
+    setSigningIn(true);
+    try {
+      await signInWithRedirect(auth, googleProvider);
+    } catch (error) {
+      const mapped = mapFirebaseAuthError(error);
+      setFormError(mapped.message);
+      setShowMissingStateHelp(true);
       setSigningIn(false);
     }
   };
@@ -506,6 +528,49 @@ export function LoginScreen({
                 </span>
                 <ArrowRight className="w-4 h-4 shrink-0" />
               </button>
+
+              <div className="pt-1 text-center">
+                <button
+                  type="button"
+                  onClick={() => setShowMissingStateHelp((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#52705E] hover:text-[#0B6B3A] underline-offset-2 hover:underline cursor-pointer"
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                  <span>
+                    {showMissingStateHelp
+                      ? 'Tutup panduan login Chrome Android'
+                      : 'Muncul error "missing initial state" / sessionStorage?'}
+                  </span>
+                </button>
+              </div>
+
+              {showMissingStateHelp && (
+                <div className="p-3.5 rounded-xl bg-[#F4F9F5] border border-[#C6E0CE] text-xs text-[#2F4F3C] space-y-2.5">
+                  <p className="font-semibold text-[#0B2416]">
+                    Panduan jika tab ...firebaseapp.com menampilkan &ldquo;missing initial state&rdquo;:
+                  </p>
+                  <ol className="list-decimal pl-4 space-y-1 leading-relaxed">
+                    <li>Tutup dulu tab <span className="font-mono-num">...firebaseapp.com</span> yang error.</li>
+                    <li>Pastikan tidak memakai <strong>Mode Penyamaran (Incognito)</strong> atau browser dalam WhatsApp/Facebook.</li>
+                    <li>
+                      Di Chrome Android, buka <strong>⋮ → Setelan → Setelan situs → Cookie pihak ketiga</strong> lalu pilih{' '}
+                      <strong>Izinkan cookie pihak ketiga</strong> (atau tambahkan{' '}
+                      <span className="font-mono-num">firebaseapp.com</span> &amp; <span className="font-mono-num">accounts.google.com</span>).
+                    </li>
+                    <li>Muat ulang halaman ini lalu tekan tombol Masuk Google lagi.</li>
+                  </ol>
+                  <div className="pt-1 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={signingIn || isBusy}
+                      onClick={() => void handleGoogleRedirectSignIn()}
+                      className="min-h-[36px] px-3 py-1.5 rounded-lg bg-white hover:bg-[#E6F4EC] border border-[#96CCA9] text-[#0B6B3A] font-semibold cursor-pointer disabled:opacity-60"
+                    >
+                      Coba Login Mode 1 Tab (Alternatif)
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </section>

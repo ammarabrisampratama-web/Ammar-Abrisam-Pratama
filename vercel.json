@@ -10,7 +10,15 @@
   },
   "rewrites": [
     {
-      "source": "/((?!api/|assets/|src/assets/).*)",
+      "source": "/__/auth/(.*)",
+      "destination": "https://kelas-6a-43640.firebaseapp.com/__/auth/$1"
+    },
+    {
+      "source": "/__/firebase/init.json",
+      "destination": "https://kelas-6a-43640.firebaseapp.com/__/firebase/init.json"
+    },
+    {
+      "source": "/((?!api/|__/auth/|__/firebase/|assets/|src/assets/).*)",
       "destination": "/index.html"
     }
   ]

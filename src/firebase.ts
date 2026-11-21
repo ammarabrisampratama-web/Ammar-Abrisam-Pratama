@@ -21,7 +21,47 @@ import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 import { withRetry } from './utils/resilience';
 
-const app = initializeApp(firebaseConfig);
+function resolveConfiguredAuthDomain(): string {
+  const raw =
+    typeof import.meta !== 'undefined' && typeof import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN === 'string'
+      ? import.meta.env.VITE_FIREBASE_AUTH_DOMAIN.trim()
+      : '';
+  if (!raw) return firebaseConfig.authDomain;
+
+  const currentHost =
+    typeof window !== 'undefined' && typeof window.location?.hostname === 'string'
+      ? window.location.hostname
+      : '';
+
+  if (raw.toLowerCase() === 'auto') {
+    if (
+      typeof window !== 'undefined' &&
+      window.location?.protocol === 'https:' &&
+      currentHost &&
+      currentHost !== 'localhost' &&
+      currentHost !== '127.0.0.1'
+    ) {
+      return currentHost;
+    }
+    return firebaseConfig.authDomain;
+  }
+
+  const allowed = raw
+    .split(',')
+    .map((d) => d.trim())
+    .filter(Boolean);
+  if (allowed.length > 1 && currentHost && allowed.includes(currentHost)) {
+    return currentHost;
+  }
+  return allowed[0] || firebaseConfig.authDomain;
+}
+
+const configuredAuthDomain = resolveConfiguredAuthDomain();
+
+const app = initializeApp({
+  ...firebaseConfig,
+  authDomain: configuredAuthDomain,
+});
 
 function createResilientFirestore(): Firestore {
   try {
