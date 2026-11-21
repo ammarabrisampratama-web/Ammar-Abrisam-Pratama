@@ -227,8 +227,16 @@ function sanitizeHistory(
   return cleaned;
 }
 
+function applyCorsHeaders(res: ServerResponse): void {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+}
+
 function sendJson(res: ServerResponse, status: number, payload: Record<string, unknown>): void {
   if (res.writableEnded) return;
+  applyCorsHeaders(res);
+  res.setHeader('Cache-Control', 'no-store');
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
@@ -267,8 +275,16 @@ async function readJsonBody(req: VercelNodeRequest): Promise<unknown> {
 
 export default async function handler(req: VercelNodeRequest, res: ServerResponse): Promise<void> {
   try {
+    applyCorsHeaders(res);
+
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
     if (req.method !== 'POST') {
-      res.setHeader('Allow', 'POST');
+      res.setHeader('Allow', 'POST, OPTIONS');
       sendJson(res, 405, { error: 'Metode tidak diizinkan. Gunakan POST.' });
       return;
     }

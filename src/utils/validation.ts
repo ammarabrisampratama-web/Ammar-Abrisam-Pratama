@@ -108,62 +108,108 @@ export const TREASURY_CATEGORIES: TreasuryCategory[] = [
 ];
 export const ADMIN_MSG_CATEGORIES: AdminMessageCategory[] = ['Izin', 'Laporan', 'Saran', 'Pertanyaan'];
 
+function getWibDateParts(date: Date): { year: number; month: number; day: number; hours: number; minutes: number; weekdayIndex: number } {
+  const wib = new Date(date.getTime() + 7 * 60 * 60 * 1000);
+  return {
+    year: wib.getUTCFullYear(),
+    month: wib.getUTCMonth() + 1,
+    day: wib.getUTCDate(),
+    hours: wib.getUTCHours(),
+    minutes: wib.getUTCMinutes(),
+    weekdayIndex: wib.getUTCDay(),
+  };
+}
+
+const ID_WEEKDAYS = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'] as const;
+const ID_MONTHS = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'] as const;
+
 // --- Timezone Asia/Jakarta Helpers ---
 export function getJakartaDateString(date: Date = new Date()): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: JAKARTA_TZ,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(date);
-  const y = parts.find((p) => p.type === 'year')?.value ?? '2026';
-  const m = parts.find((p) => p.type === 'month')?.value ?? '01';
-  const d = parts.find((p) => p.type === 'day')?.value ?? '01';
-  return `${y}-${m}-${d}`;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: JAKARTA_TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {
+    // Fallback below for older Android WebViews lacking Asia/Jakarta ICU zone data
+  }
+  const p = getWibDateParts(date);
+  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
 }
 
 export function getJakartaTimeHHMM(date: Date = new Date()): string {
-  return new Intl.DateTimeFormat('en-GB', {
-    timeZone: JAKARTA_TZ,
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(date);
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: JAKARTA_TZ,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date);
+  } catch {
+    const p = getWibDateParts(date);
+    return `${String(p.hours).padStart(2, '0')}:${String(p.minutes).padStart(2, '0')}`;
+  }
 }
 
 export function getJakartaFullDateTimeLabel(date: Date = new Date()): string {
-  return new Intl.DateTimeFormat('id-ID', {
-    timeZone: JAKARTA_TZ,
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date);
+  try {
+    return new Intl.DateTimeFormat('id-ID', {
+      timeZone: JAKARTA_TZ,
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(date);
+  } catch {
+    const p = getWibDateParts(date);
+    return `${ID_WEEKDAYS[p.weekdayIndex]}, ${p.day} ${ID_MONTHS[p.month - 1]} ${p.year} pukul ${String(p.hours).padStart(2, '0')}.${String(p.minutes).padStart(2, '0')}`;
+  }
 }
 
 export function getTodayIndonesianDay(date: Date = new Date()): DayOfWeek {
-  const weekday = new Intl.DateTimeFormat('id-ID', {
-    timeZone: JAKARTA_TZ,
-    weekday: 'long',
-  }).format(date);
-  const normalized = weekday.toLowerCase();
-  if (normalized.includes('senin')) return 'Senin';
-  if (normalized.includes('selasa')) return 'Selasa';
-  if (normalized.includes('rabu')) return 'Rabu';
-  if (normalized.includes('kamis')) return 'Kamis';
-  if (normalized.includes('jumat') || normalized.includes("jum'at")) return 'Jumat';
-  if (normalized.includes('sabtu')) return 'Sabtu';
-  return 'Senin';
+  try {
+    const weekday = new Intl.DateTimeFormat('id-ID', {
+      timeZone: JAKARTA_TZ,
+      weekday: 'long',
+    }).format(date);
+    const normalized = weekday.toLowerCase();
+    if (normalized.includes('senin')) return 'Senin';
+    if (normalized.includes('selasa')) return 'Selasa';
+    if (normalized.includes('rabu')) return 'Rabu';
+    if (normalized.includes('kamis')) return 'Kamis';
+    if (normalized.includes('jumat') || normalized.includes("jum'at")) return 'Jumat';
+    if (normalized.includes('sabtu')) return 'Sabtu';
+    return 'Senin';
+  } catch {
+    const idx = getWibDateParts(date).weekdayIndex;
+    if (idx === 1) return 'Senin';
+    if (idx === 2) return 'Selasa';
+    if (idx === 3) return 'Rabu';
+    if (idx === 4) return 'Kamis';
+    if (idx === 5) return 'Jumat';
+    if (idx === 6) return 'Sabtu';
+    return 'Senin';
+  }
 }
 
 export function isSundayJakarta(date: Date = new Date()): boolean {
-  const weekday = new Intl.DateTimeFormat('id-ID', {
-    timeZone: JAKARTA_TZ,
-    weekday: 'long',
-  }).format(date);
-  return weekday.toLowerCase().includes('minggu');
+  try {
+    const weekday = new Intl.DateTimeFormat('id-ID', {
+      timeZone: JAKARTA_TZ,
+      weekday: 'long',
+    }).format(date);
+    return weekday.toLowerCase().includes('minggu');
+  } catch {
+    return getWibDateParts(date).weekdayIndex === 0;
+  }
 }
 
 // --- RBAC Matrix ---
@@ -656,24 +702,34 @@ export function detectNewAnnouncements(
 export function formatTimestampId(ts: unknown): string {
   const ms = toMillis(ts);
   if (!ms) return 'Baru saja';
-  return new Intl.DateTimeFormat('id-ID', {
-    timeZone: JAKARTA_TZ,
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(ms));
+  try {
+    return new Intl.DateTimeFormat('id-ID', {
+      timeZone: JAKARTA_TZ,
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(ms));
+  } catch {
+    const p = getWibDateParts(new Date(ms));
+    return `${String(p.day).padStart(2, '0')}/${String(p.month).padStart(2, '0')}/${p.year} ${String(p.hours).padStart(2, '0')}.${String(p.minutes).padStart(2, '0')}`;
+  }
 }
 
 export function formatTimeOnly(ts: unknown): string {
   const ms = toMillis(ts);
   if (!ms) return '--:--';
-  return new Intl.DateTimeFormat('id-ID', {
-    timeZone: JAKARTA_TZ,
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(ms));
+  try {
+    return new Intl.DateTimeFormat('id-ID', {
+      timeZone: JAKARTA_TZ,
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(ms));
+  } catch {
+    const p = getWibDateParts(new Date(ms));
+    return `${String(p.hours).padStart(2, '0')}.${String(p.minutes).padStart(2, '0')}`;
+  }
 }
 
 export function formatRelativeLastSeen(ts: unknown, isOnline: boolean, hideOnlineStatus?: boolean): string {

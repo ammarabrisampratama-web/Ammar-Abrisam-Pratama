@@ -1,7 +1,24 @@
-import { useState } from 'react';
-import { signInWithPopup, signOut } from 'firebase/auth';
-import { AlertCircle, ArrowRight, Lock, ShieldCheck, UserCheck, Users } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { getRedirectResult, signInWithPopup, signOut } from 'firebase/auth';
+import {
+  AlertCircle,
+  ArrowRight,
+  Check,
+  Copy,
+  Lock,
+  RefreshCw,
+  ShieldCheck,
+  Smartphone,
+  UserCheck,
+  Users,
+  WifiOff,
+} from 'lucide-react';
 import { auth, googleProvider } from '../firebase';
+import {
+  detectBrowserEnvironment,
+  mapFirebaseAuthError,
+  withRetry,
+} from '../utils/resilience';
 import { CLASS_TITLE, SCHOOL_NAME, validateProfileInput } from '../utils/validation';
 import { CrestLogo } from './CrestLogo';
 
@@ -14,6 +31,8 @@ interface LoginScreenProps {
   onCompleteOnboarding: (displayName: string, nickname: string, absenNumber: number) => Promise<void>;
   onGoogleLoginSuccess: (preferredStudent?: { name: string; nickname: string; absen: number }) => void;
   authError: string | null;
+  hasSignedInUserWithoutProfile?: boolean;
+  onRetryConnection?: () => Promise<void>;
   isBusy: boolean;
 }
 
@@ -22,6 +41,8 @@ export function LoginScreen({
   onCompleteOnboarding,
   onGoogleLoginSuccess,
   authError,
+  hasSignedInUserWithoutProfile = false,
+  onRetryConnection,
   isBusy,
 }: LoginScreenProps) {
   const [loginMode, setLoginMode] = useState<'siswa' | 'owner'>('siswa');
@@ -29,7 +50,53 @@ export function LoginScreen({
   const [studentNickname, setStudentNickname] = useState('');
   const [studentAbsen, setStudentAbsen] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
+  const [suggestChromeBanner, setSuggestChromeBanner] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean' ? navigator.onLine : true
+  );
+
+  const browserEnv = useMemo(() => detectBrowserEnvironment(), []);
+
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    getRedirectResult(auth).catch((error) => {
+      if (!active) return;
+      const mapped = mapFirebaseAuthError(error);
+      setFormError(mapped.message);
+      if (mapped.suggestExternalBrowser) {
+        setSuggestChromeBanner(true);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleCopyPortalLink = async () => {
+    try {
+      const targetUrl = window.location.origin;
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(targetUrl);
+        setCopiedUrl(true);
+        window.setTimeout(() => setCopiedUrl(false), 2500);
+      }
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
 
   const handleGoogleSignIn = async () => {
     setFormError(null);
@@ -49,22 +116,27 @@ export function LoginScreen({
       preferredStudent = { name: studentName.trim(), nickname: nick, absen: absenNum };
     }
 
+    if (!isOnline) {
+      setFormError('Perangkat sedang offline. Aktifkan Wi-Fi atau data seluler lalu coba masuk kembali.');
+      return;
+    }
+
     setSigningIn(true);
     try {
-      await signInWithPopup(auth, googleProvider);
+      await withRetry(
+        () => signInWithPopup(auth, googleProvider),
+        {
+          maxAttempts: 2,
+          baseDelayMs: 400,
+          shouldRetry: (err) => mapFirebaseAuthError(err).retryable,
+        }
+      );
       onGoogleLoginSuccess(preferredStudent);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Gagal masuk dengan Google.';
-      if (msg.includes('popup-closed-by-user')) {
-        setFormError('Jendela login Google ditutup sebelum selesai.');
-      } else if (msg.includes('popup-blocked')) {
-        setFormError('Popup login diblokir browser. Izinkan popup lalu coba lagi.');
-      } else if (msg.includes('unauthorized-domain')) {
-        setFormError(
-          'Domain ini belum terdaftar di Firebase Console (Authentication → Settings → Authorized domains). Tambahkan domain aplikasi terlebih dahulu.'
-        );
-      } else {
-        setFormError('Autentikasi Google gagal. Silakan periksa koneksi lalu coba kembali.');
+      const mapped = mapFirebaseAuthError(error);
+      setFormError(mapped.message);
+      if (mapped.suggestExternalBrowser) {
+        setSuggestChromeBanner(true);
       }
     } finally {
       setSigningIn(false);
@@ -87,6 +159,12 @@ export function LoginScreen({
       setFormError(error instanceof Error ? error.message : 'Gagal menyimpan profil siswa.');
     }
   };
+
+  const showBrowserCompatibilityNotice =
+    browserEnv.isInAppWebView ||
+    !browserEnv.sessionStorageAvailable ||
+    !browserEnv.localStorageAvailable ||
+    suggestChromeBanner;
 
   return (
     <div className="min-h-screen bg-[#F4F9F5] text-[#0B2416] flex flex-col justify-between p-4 sm:p-8">
@@ -280,10 +358,69 @@ export function LoginScreen({
                 </button>
               </div>
 
+              {!isOnline && (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5" role="status">
+                  <WifiOff className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">
+                    Koneksi internet perangkat sedang terputus. Nyalakan Wi-Fi atau data seluler untuk masuk ke portal kelas.
+                  </span>
+                </div>
+              )}
+
+              {showBrowserCompatibilityNotice && (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs space-y-2" role="status">
+                  <div className="flex items-start gap-2">
+                    <Smartphone className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="font-semibold text-[#0B2416]">
+                        {browserEnv.isInAppWebView
+                          ? `Terbuka lewat ${browserEnv.inAppAppName}`
+                          : 'Penyimpanan Browser Dibatasi'}
+                      </p>
+                      <p className="leading-relaxed">
+                        {browserEnv.isInAppWebView
+                          ? 'Login Google sering gagal di browser dalam aplikasi karena sessionStorage dibatasi. Ketuk menu titik tiga (⋮) lalu pilih "Buka di Chrome".'
+                          : 'Browser memblokir cookie/sessionStorage. Izinkan Cookie & Data Situs di Chrome atau buka tab normal (bukan Incognito).'}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyPortalLink()}
+                    className="min-h-[36px] px-3 py-1.5 rounded-lg bg-white hover:bg-amber-100/60 border border-amber-300 text-[#0B2416] font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedUrl ? <Check className="w-3.5 h-3.5 text-[#0B6B3A]" /> : <Copy className="w-3.5 h-3.5 text-amber-700" />}
+                    <span>{copiedUrl ? 'Tautan Disalin!' : 'Salin Tautan Portal untuk Chrome'}</span>
+                  </button>
+                </div>
+              )}
+
               {(formError || authError) && (
-                <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5" role="alert">
-                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                  <span>{formError || authError}</span>
+                <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs space-y-2.5" role="alert">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span className="leading-relaxed">{formError || authError}</span>
+                  </div>
+                  {hasSignedInUserWithoutProfile && onRetryConnection && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => void onRetryConnection()}
+                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#0B6B3A] hover:bg-[#09562E] disabled:opacity-60 text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Coba Hubungkan Ulang</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void signOut(auth)}
+                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-white hover:bg-rose-100 border border-rose-300 text-rose-800 font-semibold cursor-pointer"
+                      >
+                        Keluar / Ganti Akun
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 

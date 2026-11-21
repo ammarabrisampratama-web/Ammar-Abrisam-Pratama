@@ -5,6 +5,7 @@ import {
   query,
 } from 'firebase/firestore';
 import {
+  AlertCircle,
   ArrowLeft,
   Flag,
   Gamepad2,
@@ -14,6 +15,7 @@ import {
   MessageSquare,
   Pin,
   Plus,
+  RefreshCw,
   ShieldAlert,
   ShieldCheck,
   Trash2,
@@ -21,7 +23,8 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react';
-import { db, handleFirestoreError, OperationType } from '../../firebase';
+import { buildFirestoreErrorInfo, db, OperationType } from '../../firebase';
+import { classifyApplicationError } from '../../utils/resilience';
 import {
   createGamePost,
   deleteGamePost,
@@ -119,6 +122,8 @@ export function GameCenterView({
     'fc-mobile': [],
   });
   const [brokenImages, setBrokenImages] = useState<Set<string>>(new Set());
+  const [communityError, setCommunityError] = useState<string | null>(null);
+  const [listenerRetryTick, setListenerRetryTick] = useState(0);
 
   // Join / LFG form
   const [inGameName, setInGameName] = useState('');
@@ -153,38 +158,85 @@ export function GameCenterView({
 
   // Subscribe to member rosters for all 4 communities
   useEffect(() => {
+    setCommunityError(null);
     const unsubs = GAME_CATALOG.map((g) =>
       onSnapshot(
         query(collection(db, 'game_communities', g.gameId, 'members')),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            ...(d.data() as GameMembership),
-            uid: d.id,
-          }));
+          const list: GameMembership[] = snap.docs.map((d) => {
+            const raw = d.data() as Partial<GameMembership>;
+            return {
+              uid: d.id,
+              gameId: g.gameId,
+              classId: '6A',
+              displayName: raw.displayName || 'Siswa 6A',
+              nickname: raw.nickname || '',
+              photoURL: raw.photoURL || '',
+              role: raw.role || 'siswa',
+              inGameName: raw.inGameName || '',
+              inGameId: raw.inGameId || '',
+              lfgStatus: raw.lfgStatus || 'offline',
+              lfgNote: raw.lfgNote || '',
+              joinedAt: raw.joinedAt ?? null,
+              updatedAt: raw.updatedAt ?? null,
+            };
+          });
           setMembersByGame((prev) => ({ ...prev, [g.gameId]: list }));
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, `game_communities/${g.gameId}/members`)
+        (error) => {
+          console.error(
+            'Game members snapshot error:',
+            buildFirestoreErrorInfo(error, OperationType.LIST, `game_communities/${g.gameId}/members`)
+          );
+          const friendly = classifyApplicationError(error);
+          setCommunityError(`${friendly.title}: ${friendly.message}`);
+        }
       )
     );
     return () => unsubs.forEach((u) => u());
-  }, []);
+  }, [listenerRetryTick]);
 
   // Subscribe to posts + ensure system room when viewing a specific game
   useEffect(() => {
     if (!selectedGameId) return;
-    void ensureSystemChatRoom(GAME_ROOM_IDS[selectedGameId], profile);
+    void ensureSystemChatRoom(GAME_ROOM_IDS[selectedGameId], profile).catch((err) => {
+      console.warn('ensureSystemChatRoom warning:', err);
+    });
     const unsub = onSnapshot(
       query(collection(db, 'game_communities', selectedGameId, 'posts')),
       (snap) => {
-        const list = snap.docs
-          .map((d) => ({ id: d.id, ...(d.data() as Omit<GamePost, 'id'>) }))
+        const list: GamePost[] = snap.docs
+          .map((d) => {
+            const raw = d.data() as Partial<Omit<GamePost, 'id'>>;
+            return {
+              id: d.id,
+              gameId: selectedGameId,
+              classId: '6A' as const,
+              type: raw.type === 'pengumuman' ? ('pengumuman' as const) : ('update' as const),
+              title: raw.title || 'Info Komunitas',
+              content: raw.content || '',
+              authorId: raw.authorId || '',
+              authorName: raw.authorName || 'Pengurus',
+              authorRole: raw.authorRole || 'admin',
+              pinned: Boolean(raw.pinned),
+              createdAt: raw.createdAt ?? null,
+              updatedAt: raw.updatedAt ?? null,
+            };
+          })
           .sort((a, b) => Number(b.pinned) - Number(a.pinned) || toMillis(b.createdAt) - toMillis(a.createdAt));
         setPostsByGame((prev) => ({ ...prev, [selectedGameId]: list }));
       },
-      (error) => handleFirestoreError(error, OperationType.LIST, `game_communities/${selectedGameId}/posts`)
+      (error) => {
+        console.error(
+          'Game posts snapshot error:',
+          buildFirestoreErrorInfo(error, OperationType.LIST, `game_communities/${selectedGameId}/posts`)
+        );
+        const friendly = classifyApplicationError(error);
+        setCommunityError(`${friendly.title}: ${friendly.message}`);
+      }
     );
     return () => unsub();
-  }, [selectedGameId, profile]);
+  }, [selectedGameId, profile, listenerRetryTick]);
 
   const selectedGame = useMemo(
     () => GAME_CATALOG.find((g) => g.gameId === selectedGameId) ?? null,
@@ -381,6 +433,23 @@ export function GameCenterView({
           </div>
         </section>
 
+        {communityError && (
+          <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 flex flex-wrap items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-amber-700 dark:text-amber-400" />
+              <span>{communityError}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setListenerRetryTick((t) => t + 1)}
+              className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Coba Muat Ulang</span>
+            </button>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           {GAME_CATALOG.map((game) => {
             const roster = membersByGame[game.gameId] || [];
@@ -518,6 +587,23 @@ export function GameCenterView({
           </span>
         </div>
       </div>
+
+      {communityError && (
+        <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 flex flex-wrap items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-700 dark:text-amber-400" />
+            <span>{communityError}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setListenerRetryTick((t) => t + 1)}
+            className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Coba Muat Ulang</span>
+          </button>
+        </div>
+      )}
 
       {reportDone && (
         <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold text-emerald-800 dark:text-emerald-200">

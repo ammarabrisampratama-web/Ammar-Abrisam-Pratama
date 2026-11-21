@@ -7,6 +7,7 @@ import {
   type C6AClassContextData,
   runC6ABotCommand,
 } from '../../utils/c6aBot';
+import { fetchWithTimeoutAndRetry } from '../../utils/resilience';
 import { getUserDisplayLabel } from '../../utils/validation';
 
 interface C6AAssistantViewProps {
@@ -36,11 +37,16 @@ const AI_STARTER_PROMPTS = [
 ];
 
 function formatNowTimeLabel(): string {
-  return new Intl.DateTimeFormat('id-ID', {
-    timeZone: 'Asia/Jakarta',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date());
+  try {
+    return new Intl.DateTimeFormat('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date());
+  } catch {
+    const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    return `${String(wib.getUTCHours()).padStart(2, '0')}.${String(wib.getUTCMinutes()).padStart(2, '0')}`;
+  }
 }
 
 function createWelcomeMessage(nickname: string, botAllowed: boolean): C6AConversationMessage {
@@ -111,6 +117,11 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
       return;
     }
 
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setErrorMsg('Perangkat sedang offline. Hubungkan kembali ke Wi-Fi atau data seluler untuk memakai C6A AI v1.');
+      return;
+    }
+
     const historyForServer = messages
       .filter((m) => m.id !== 'c6a-welcome')
       .slice(-10)
@@ -133,30 +144,38 @@ export function C6AAssistantView({ profile, classContext }: C6AAssistantViewProp
         userRole: profile.role,
       };
 
-      let res = await fetch('/api/c6a/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...requestBody,
-          stream: true,
-        }),
-      });
-
-      if (res.status === 504 || res.status === 503 || res.status === 502) {
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        res = await fetch('/api/c6a/chat', {
+      let res = await fetchWithTimeoutAndRetry(
+        '/api/c6a/chat',
+        {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
             ...requestBody,
-            stream: false,
-            fastMode: true,
+            stream: true,
           }),
-        });
+        },
+        { timeoutMs: 14000, maxRetries: 1, retryDelayMs: 450 }
+      );
+
+      if (res.status === 504 || res.status === 503 || res.status === 502) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        res = await fetchWithTimeoutAndRetry(
+          '/api/c6a/chat',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              ...requestBody,
+              stream: false,
+              fastMode: true,
+            }),
+          },
+          { timeoutMs: 14000, maxRetries: 1, retryDelayMs: 500 }
+        );
       }
 
       const contentType = res.headers.get('content-type') || '';

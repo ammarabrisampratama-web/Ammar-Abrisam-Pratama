@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
   collection,
@@ -9,8 +9,14 @@ import {
   query,
   where,
 } from 'firebase/firestore';
-import { Ban, LogOut, Moon, Search, Sun } from 'lucide-react';
-import { auth, BOOTSTRAPPED_OWNER_EMAIL, db, handleFirestoreError, OperationType } from './firebase';
+import { AlertTriangle, Ban, LogOut, Moon, RefreshCw, Search, Sun, WifiOff } from 'lucide-react';
+import {
+  auth,
+  BOOTSTRAPPED_OWNER_EMAIL,
+  buildFirestoreErrorInfo,
+  db,
+  OperationType,
+} from './firebase';
 import { CrestLogo } from './components/CrestLogo';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { LoginScreen } from './components/LoginScreen';
@@ -76,6 +82,19 @@ import {
   SCHOOL_NAME,
   toMillis,
 } from './utils/validation';
+import {
+  classifyApplicationError,
+  isTransientNetworkError,
+  safeLocalStorageGet,
+  safeLocalStorageSet,
+  safeNotificationPermission,
+  safeRequestNotificationPermission,
+  safeSessionStorageGet,
+  safeSessionStorageRemove,
+  safeSessionStorageSet,
+  safeShowBrowserNotification,
+  withRetry,
+} from './utils/resilience';
 import type { C6AClassContextData } from './utils/c6aBot';
 
 export default function App() {
@@ -95,14 +114,20 @@ export default function App() {
   const [selectedChatRoomId, setSelectedChatRoomId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [compactMode, setCompactMode] = useState<boolean>(
-    () => typeof localStorage !== 'undefined' && localStorage.getItem('kelas6a_compact') === '1'
+    () => safeLocalStorageGet('kelas6a_compact') === '1'
   );
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    if (typeof localStorage !== 'undefined' && localStorage.getItem('kelas6a_theme') === 'dark') {
-      return 'dark';
-    }
-    return 'light';
-  });
+  const [theme, setTheme] = useState<'light' | 'dark'>(() =>
+    safeLocalStorageGet('kelas6a_theme') === 'dark' ? 'dark' : 'light'
+  );
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean' ? navigator.onLine : true
+  );
+  const [syncNotice, setSyncNotice] = useState<{
+    title: string;
+    message: string;
+    isPermission: boolean;
+  } | null>(null);
+  const [subscriptionRetryTick, setSubscriptionRetryTick] = useState(0);
 
   // Apply Dark/Light theme class on <html>
   useEffect(() => {
@@ -112,7 +137,7 @@ export default function App() {
     } else {
       root.classList.remove('dark');
     }
-    localStorage.setItem('kelas6a_theme', theme);
+    safeLocalStorageSet('kelas6a_theme', theme);
   }, [theme]);
 
   // Real-time Firestore collections
@@ -145,7 +170,7 @@ export default function App() {
   const [readNotifIds, setReadNotifIds] = useState<Set<string>>(new Set());
   const [liveToast, setLiveToast] = useState<NotificationItem | null>(null);
   const [browserPushEnabled, setBrowserPushEnabled] = useState<boolean>(
-    typeof Notification !== 'undefined' && Notification.permission === 'granted'
+    () => safeNotificationPermission() === 'granted'
   );
 
   // Runtime error log capture for Owner diagnostics
@@ -200,6 +225,94 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // Track browser online/offline state and auto-recover subscriptions
+  useEffect(() => {
+    const onOnline = () => {
+      setIsOnline(true);
+      setSyncNotice(null);
+      setSubscriptionRetryTick((t) => t + 1);
+    };
+    const onOffline = () => {
+      setIsOnline(false);
+    };
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  const hydrateAuthenticatedUser = useCallback(async (user: User) => {
+    setAuthError(null);
+    setIsProfileBusy(true);
+    try {
+      const existing = await withRetry(() => fetchPublicProfile(user.uid), {
+        maxAttempts: 3,
+        baseDelayMs: 450,
+      });
+
+      if (existing) {
+        setProfile(existing);
+        setPendingOnboardingUser(null);
+
+        try {
+          await withRetry(() => syncPrivateUserOnLogin(user), {
+            maxAttempts: 2,
+            baseDelayMs: 400,
+          });
+        } catch (syncErr) {
+          console.warn('Non-fatal private user sync notice:', syncErr);
+        }
+
+        const sessionFlag = `logged_login_${user.uid}`;
+        if (!safeSessionStorageGet(sessionFlag)) {
+          recordLoginAudit(user, existing)
+            .then(() => safeSessionStorageSet(sessionFlag, '1'))
+            .catch((auditErr) => console.warn('Non-fatal login audit notice:', auditErr));
+        }
+      } else if (user.email === BOOTSTRAPPED_OWNER_EMAIL) {
+        const ownerProfile = await withRetry(
+          () =>
+            createOrUpdateUserProfile(
+              user,
+              user.displayName || 'Wali Kelas 6A',
+              'Wali Kelas',
+              0,
+              true
+            ),
+          { maxAttempts: 2, baseDelayMs: 450 }
+        );
+        safeSessionStorageSet(`logged_login_${user.uid}`, '1');
+        setProfile(ownerProfile);
+        setPendingOnboardingUser(null);
+      } else if (preferredStudentRef.current) {
+        const pref = preferredStudentRef.current;
+        preferredStudentRef.current = undefined;
+        const created = await withRetry(
+          () => createOrUpdateUserProfile(user, pref.name, pref.nickname, pref.absen, true),
+          { maxAttempts: 2, baseDelayMs: 450 }
+        );
+        safeSessionStorageSet(`logged_login_${user.uid}`, '1');
+        setProfile(created);
+        setPendingOnboardingUser(null);
+      } else {
+        setProfile(null);
+        setPendingOnboardingUser({
+          uid: user.uid,
+          email: user.email || '',
+          defaultName: user.displayName || '',
+        });
+      }
+    } catch (err) {
+      const classified = classifyApplicationError(err);
+      setAuthError(`${classified.title}: ${classified.message} ${classified.hint}`);
+    } finally {
+      setIsProfileBusy(false);
+      setAuthReady(true);
+    }
+  }, []);
+
   // Auth listener & persistent session hydration
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -209,65 +322,18 @@ export default function App() {
       if (!user) {
         setProfile(null);
         setPendingOnboardingUser(null);
+        setSyncNotice(null);
         setAuthReady(true);
         knownNotifIdsRef.current = new Set();
         notifsInitializedRef.current = false;
         return;
       }
 
-      try {
-        const existing = await fetchPublicProfile(user.uid);
-        if (existing) {
-          setProfile(existing);
-          setPendingOnboardingUser(null);
-          await syncPrivateUserOnLogin(user);
-
-          const sessionFlag = `logged_login_${user.uid}`;
-          if (!sessionStorage.getItem(sessionFlag)) {
-            await recordLoginAudit(user, existing);
-            sessionStorage.setItem(sessionFlag, '1');
-          }
-        } else if (user.email === BOOTSTRAPPED_OWNER_EMAIL) {
-          const ownerProfile = await createOrUpdateUserProfile(
-            user,
-            user.displayName || 'Wali Kelas 6A',
-            'Wali Kelas',
-            0,
-            true
-          );
-          sessionStorage.setItem(`logged_login_${user.uid}`, '1');
-          setProfile(ownerProfile);
-          setPendingOnboardingUser(null);
-        } else if (preferredStudentRef.current) {
-          const pref = preferredStudentRef.current;
-          preferredStudentRef.current = undefined;
-          const created = await createOrUpdateUserProfile(
-            user,
-            pref.name,
-            pref.nickname,
-            pref.absen,
-            true
-          );
-          sessionStorage.setItem(`logged_login_${user.uid}`, '1');
-          setProfile(created);
-          setPendingOnboardingUser(null);
-        } else {
-          setProfile(null);
-          setPendingOnboardingUser({
-            uid: user.uid,
-            email: user.email || '',
-            defaultName: user.displayName || '',
-          });
-        }
-      } catch (err) {
-        setAuthError(err instanceof Error ? err.message : 'Gagal memuat profil pengguna.');
-      } finally {
-        setAuthReady(true);
-      }
+      await hydrateAuthenticatedUser(user);
     });
 
     return () => unsub();
-  }, []);
+  }, [hydrateAuthenticatedUser]);
 
   // Real-time presence heartbeat
   useEffect(() => {
@@ -307,11 +373,48 @@ export default function App() {
     const isStaff = profile.role === 'owner' || profile.role === 'admin';
     const unsubs: Array<() => void> = [];
 
+    const handleListenerError = (
+      error: unknown,
+      operationType: OperationType,
+      path: string,
+      optional: boolean = false
+    ) => {
+      const info = buildFirestoreErrorInfo(error, operationType, path);
+      console.error('Firestore Error: ', JSON.stringify(info));
+      const classified = classifyApplicationError(error);
+      setClientErrors((prev) =>
+        [
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            source: `firestore:${path}`,
+            message: `${classified.code} — ${info.error}`.slice(0, 300),
+            timestamp: new Date().toLocaleTimeString('id-ID'),
+          },
+          ...prev,
+        ].slice(0, 50)
+      );
+
+      if (optional && isTransientNetworkError(error)) {
+        return;
+      }
+
+      setSyncNotice({
+        title: classified.title,
+        message: `${classified.message} (${path})`,
+        isPermission: classified.category === 'permission',
+      });
+    };
+
+    const clearTransientNotice = () => {
+      setSyncNotice((prev) => (prev && !prev.isPermission ? null : prev));
+    };
+
     // 0. Class & App Settings
     unsubs.push(
       onSnapshot(
         doc(db, 'settings', 'class_config'),
         (snap) => {
+          clearTransientNotice();
           if (snap.exists()) {
             const raw = snap.data() as Partial<ClassSettings>;
             setSettings({
@@ -324,7 +427,7 @@ export default function App() {
             setSettings({ ...DEFAULT_CLASS_SETTINGS, updatedAt: null });
           }
         },
-        (error) => handleFirestoreError(error, OperationType.GET, 'settings/class_config')
+        (error) => handleListenerError(error, OperationType.GET, 'settings/class_config', true)
       )
     );
 
@@ -333,20 +436,21 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'announcements'), where('classId', '==', CLASS_ID)),
         (snap) => {
+          clearTransientNotice();
           const list = snap.docs
             .map((d) => {
               const raw = d.data() as Partial<Announcement>;
               return {
                 id: d.id,
                 classId: '6A' as const,
-                title: raw.title || '',
-                content: raw.content || '',
+                title: typeof raw.title === 'string' ? raw.title : '',
+                content: typeof raw.content === 'string' ? raw.content : '',
                 category: raw.category || 'Umum',
                 priority: raw.priority || 'normal',
                 pinned: Boolean(raw.pinned),
                 archived: Boolean(raw.archived),
-                authorId: raw.authorId || '',
-                authorName: raw.authorName || 'Pengurus',
+                authorId: typeof raw.authorId === 'string' ? raw.authorId : '',
+                authorName: typeof raw.authorName === 'string' ? raw.authorName : 'Pengurus',
                 authorRole: raw.authorRole || 'admin',
                 createdAt: raw.createdAt ?? null,
                 updatedAt: raw.updatedAt ?? null,
@@ -355,7 +459,7 @@ export default function App() {
             .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
           setAnnouncements(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'announcements')
+        (error) => handleListenerError(error, OperationType.LIST, 'announcements')
       )
     );
 
@@ -364,20 +468,21 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'assignments'), where('classId', '==', CLASS_ID)),
         (snap) => {
+          clearTransientNotice();
           const list = snap.docs
             .map((d) => {
               const raw = d.data() as Partial<Assignment>;
               return {
                 id: d.id,
                 classId: '6A' as const,
-                subject: raw.subject || 'Umum',
-                title: raw.title || '',
-                description: raw.description || '',
-                assignedDate: raw.assignedDate || raw.dueDate || '',
-                dueDate: raw.dueDate || '',
+                subject: typeof raw.subject === 'string' ? raw.subject : 'Umum',
+                title: typeof raw.title === 'string' ? raw.title : '',
+                description: typeof raw.description === 'string' ? raw.description : '',
+                assignedDate: typeof raw.assignedDate === 'string' ? raw.assignedDate : typeof raw.dueDate === 'string' ? raw.dueDate : '',
+                dueDate: typeof raw.dueDate === 'string' ? raw.dueDate : '',
                 priority: raw.priority || 'sedang',
-                authorId: raw.authorId || '',
-                authorName: raw.authorName || 'Anggota 6A',
+                authorId: typeof raw.authorId === 'string' ? raw.authorId : '',
+                authorName: typeof raw.authorName === 'string' ? raw.authorName : 'Anggota 6A',
                 authorRole: raw.authorRole || 'siswa',
                 editHistory: Array.isArray(raw.editHistory) ? raw.editHistory : [],
                 createdAt: raw.createdAt ?? null,
@@ -387,7 +492,7 @@ export default function App() {
             .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
           setAssignments(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'assignments')
+        (error) => handleListenerError(error, OperationType.LIST, 'assignments')
       )
     );
 
@@ -408,7 +513,7 @@ export default function App() {
           });
           setTaskProgressMap(map);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, `users_private/${uid}/task_progress`)
+        (error) => handleListenerError(error, OperationType.LIST, `users_private/${uid}/task_progress`, true)
       )
     );
 
@@ -417,6 +522,7 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'schedules'), where('classId', '==', CLASS_ID)),
         (snap) => {
+          clearTransientNotice();
           const list = snap.docs.map((d) => {
             const raw = d.data() as Partial<ScheduleItem>;
             return {
@@ -424,19 +530,19 @@ export default function App() {
               classId: '6A' as const,
               day: raw.day || 'Senin',
               order: typeof raw.order === 'number' ? raw.order : 1,
-              startTime: raw.startTime || '',
-              endTime: raw.endTime || '',
-              subject: raw.subject || '',
-              teacher: raw.teacher || '',
-              room: raw.room || '',
-              authorId: raw.authorId || '',
+              startTime: typeof raw.startTime === 'string' ? raw.startTime : '',
+              endTime: typeof raw.endTime === 'string' ? raw.endTime : '',
+              subject: typeof raw.subject === 'string' ? raw.subject : '',
+              teacher: typeof raw.teacher === 'string' ? raw.teacher : '',
+              room: typeof raw.room === 'string' ? raw.room : '',
+              authorId: typeof raw.authorId === 'string' ? raw.authorId : '',
               updatedAt: raw.updatedAt ?? null,
             };
           });
           setSchedules(list);
           setSchedulesLoaded(true);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'schedules')
+        (error) => handleListenerError(error, OperationType.LIST, 'schedules')
       )
     );
 
@@ -445,13 +551,23 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'picket_schedules'), where('classId', '==', CLASS_ID)),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<PicketScheduleItem, 'id'>),
-          }));
+          const list: PicketScheduleItem[] = snap.docs.map((d) => {
+            const raw = d.data() as Partial<PicketScheduleItem>;
+            return {
+              id: d.id,
+              classId: '6A',
+              day: raw.day || 'Senin',
+              students: Array.isArray(raw.students) ? raw.students.filter((s): s is string => typeof s === 'string') : [],
+              tasks: Array.isArray(raw.tasks) ? raw.tasks.filter((t): t is string => typeof t === 'string') : [],
+              coordinator: typeof raw.coordinator === 'string' ? raw.coordinator : '',
+              note: typeof raw.note === 'string' ? raw.note : '',
+              updatedById: typeof raw.updatedById === 'string' ? raw.updatedById : '',
+              updatedAt: raw.updatedAt ?? null,
+            };
+          });
           setPicketSchedules(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'picket_schedules')
+        (error) => handleListenerError(error, OperationType.LIST, 'picket_schedules', true)
       )
     );
 
@@ -460,13 +576,26 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'agendas'), where('classId', '==', CLASS_ID)),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<AgendaItem, 'id'>),
-          }));
+          const list: AgendaItem[] = snap.docs.map((d) => {
+            const raw = d.data() as Partial<AgendaItem>;
+            return {
+              id: d.id,
+              classId: '6A',
+              title: typeof raw.title === 'string' ? raw.title : '',
+              description: typeof raw.description === 'string' ? raw.description : '',
+              eventDate: typeof raw.eventDate === 'string' ? raw.eventDate : '',
+              eventTime: typeof raw.eventTime === 'string' ? raw.eventTime : '',
+              location: typeof raw.location === 'string' ? raw.location : '',
+              status: raw.status === 'selesai' ? 'selesai' : 'mendatang',
+              authorId: typeof raw.authorId === 'string' ? raw.authorId : '',
+              authorName: typeof raw.authorName === 'string' ? raw.authorName : 'Anggota 6A',
+              createdAt: raw.createdAt ?? null,
+              updatedAt: raw.updatedAt ?? null,
+            };
+          });
           setAgendas(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'agendas')
+        (error) => handleListenerError(error, OperationType.LIST, 'agendas', true)
       )
     );
 
@@ -481,22 +610,22 @@ export default function App() {
               id: d.id,
               classId: '6A' as const,
               type: raw.type || 'pemasukan',
-              amount: raw.amount || 0,
-              description: raw.description || '',
+              amount: typeof raw.amount === 'number' && Number.isFinite(raw.amount) ? raw.amount : 0,
+              description: typeof raw.description === 'string' ? raw.description : '',
               category: raw.category || 'Lainnya',
-              studentName: raw.studentName || '',
+              studentName: typeof raw.studentName === 'string' ? raw.studentName : '',
               paymentStatus: raw.paymentStatus || (raw.type === 'pengeluaran' ? 'operasional' : 'lunas'),
-              correctionNote: raw.correctionNote || '',
-              date: raw.date || '',
-              recordedById: raw.recordedById || '',
-              recordedByName: raw.recordedByName || 'Pengurus',
+              correctionNote: typeof raw.correctionNote === 'string' ? raw.correctionNote : '',
+              date: typeof raw.date === 'string' ? raw.date : '',
+              recordedById: typeof raw.recordedById === 'string' ? raw.recordedById : '',
+              recordedByName: typeof raw.recordedByName === 'string' ? raw.recordedByName : 'Pengurus',
               createdAt: raw.createdAt ?? null,
               updatedAt: raw.updatedAt ?? null,
             };
           });
           setTreasury(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'treasury')
+        (error) => handleListenerError(error, OperationType.LIST, 'treasury', true)
       )
     );
 
@@ -505,27 +634,53 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'chat_messages'), where('classId', '==', CLASS_ID)),
         (snap) => {
-          const list = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as Omit<ChatMessage, 'id'>) }))
+          const list: ChatMessage[] = snap.docs
+            .map((d) => {
+              const raw = d.data() as Partial<ChatMessage>;
+              return {
+                id: d.id,
+                classId: '6A' as const,
+                senderId: typeof raw.senderId === 'string' ? raw.senderId : '',
+                senderName: typeof raw.senderName === 'string' ? raw.senderName : 'Anggota 6A',
+                senderRole: raw.senderRole || 'siswa',
+                text: typeof raw.text === 'string' ? raw.text : '',
+                createdAt: raw.createdAt ?? null,
+              };
+            })
             .sort((a, b) => toMillis(a.createdAt) - toMillis(b.createdAt));
           setChatMessages(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'chat_messages')
+        (error) => handleListenerError(error, OperationType.LIST, 'chat_messages', true)
       )
     );
 
     // 7b. Upgraded Chat Rooms (Public/Group/Game + Own DMs)
+    const normalizeRoom = (id: string, raw: Partial<ChatRoom>): ChatRoom => ({
+      id,
+      roomId: typeof raw.roomId === 'string' && raw.roomId ? raw.roomId : id,
+      classId: '6A',
+      type: raw.type || 'group',
+      name: typeof raw.name === 'string' ? raw.name : 'Ruang Chat',
+      description: typeof raw.description === 'string' ? raw.description : '',
+      gameId: typeof raw.gameId === 'string' ? raw.gameId : '',
+      participantIds: Array.isArray(raw.participantIds) ? raw.participantIds.filter((p): p is string => typeof p === 'string') : [],
+      pinnedMessageId: typeof raw.pinnedMessageId === 'string' ? raw.pinnedMessageId : '',
+      pinnedText: typeof raw.pinnedText === 'string' ? raw.pinnedText : '',
+      pinnedByName: typeof raw.pinnedByName === 'string' ? raw.pinnedByName : '',
+      lastMessageText: typeof raw.lastMessageText === 'string' ? raw.lastMessageText : '',
+      lastMessageSenderId: typeof raw.lastMessageSenderId === 'string' ? raw.lastMessageSenderId : '',
+      lastMessageAt: raw.lastMessageAt ?? null,
+      createdBy: typeof raw.createdBy === 'string' ? raw.createdBy : '',
+      updatedAt: raw.updatedAt ?? null,
+    });
+
     unsubs.push(
       onSnapshot(
         query(collection(db, 'chat_rooms'), where('type', 'in', ['class', 'group', 'game'])),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<ChatRoom, 'id'>),
-          }));
-          setPublicRooms(list);
+          setPublicRooms(snap.docs.map((d) => normalizeRoom(d.id, d.data() as Partial<ChatRoom>)));
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'chat_rooms_public')
+        (error) => handleListenerError(error, OperationType.LIST, 'chat_rooms_public', true)
       )
     );
 
@@ -533,13 +688,9 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'chat_rooms'), where('participantIds', 'array-contains', uid)),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<ChatRoom, 'id'>),
-          }));
-          setDmRooms(list);
+          setDmRooms(snap.docs.map((d) => normalizeRoom(d.id, d.data() as Partial<ChatRoom>)));
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'chat_rooms_dm')
+        (error) => handleListenerError(error, OperationType.LIST, 'chat_rooms_dm', true)
       )
     );
 
@@ -548,13 +699,18 @@ export default function App() {
       onSnapshot(
         collection(db, 'presence'),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            ...(d.data() as UserPresence),
-            uid: d.id,
-          }));
+          const list: UserPresence[] = snap.docs.map((d) => {
+            const raw = d.data() as Partial<UserPresence>;
+            return {
+              uid: d.id,
+              isOnline: Boolean(raw.isOnline),
+              hideOnlineStatus: Boolean(raw.hideOnlineStatus),
+              lastSeenAt: raw.lastSeenAt ?? null,
+            };
+          });
           setPresenceList(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'presence')
+        (error) => handleListenerError(error, OperationType.LIST, 'presence', true)
       )
     );
 
@@ -562,10 +718,17 @@ export default function App() {
       onSnapshot(
         collection(db, 'users_private', uid, 'blocked_users'),
         (snap) => {
-          const list = snap.docs.map((d) => d.data() as BlockedUser);
+          const list: BlockedUser[] = snap.docs.map((d) => {
+            const raw = d.data() as Partial<BlockedUser>;
+            return {
+              targetUid: typeof raw.targetUid === 'string' ? raw.targetUid : d.id,
+              targetName: typeof raw.targetName === 'string' ? raw.targetName : 'Anggota 6A',
+              blockedAt: raw.blockedAt ?? null,
+            };
+          });
           setBlockedUsers(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, `users_private/${uid}/blocked_users`)
+        (error) => handleListenerError(error, OperationType.LIST, `users_private/${uid}/blocked_users`, true)
       )
     );
 
@@ -578,12 +741,28 @@ export default function App() {
       onSnapshot(
         adminMsgQuery,
         (snap) => {
-          const list = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as Omit<AdminMessage, 'id'>) }))
+          const list: AdminMessage[] = snap.docs
+            .map((d) => {
+              const raw = d.data() as Partial<AdminMessage>;
+              return {
+                id: d.id,
+                classId: '6A' as const,
+                senderId: typeof raw.senderId === 'string' ? raw.senderId : '',
+                senderName: typeof raw.senderName === 'string' ? raw.senderName : 'Siswa 6A',
+                category: raw.category || 'Pertanyaan',
+                subject: typeof raw.subject === 'string' ? raw.subject : '',
+                message: typeof raw.message === 'string' ? raw.message : '',
+                status: raw.status || 'menunggu',
+                adminReply: typeof raw.adminReply === 'string' ? raw.adminReply : '',
+                repliedBy: typeof raw.repliedBy === 'string' ? raw.repliedBy : '',
+                createdAt: raw.createdAt ?? null,
+                updatedAt: raw.updatedAt ?? null,
+              };
+            })
             .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
           setAdminMessages(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'admin_messages')
+        (error) => handleListenerError(error, OperationType.LIST, 'admin_messages', true)
       )
     );
 
@@ -596,12 +775,32 @@ export default function App() {
       onSnapshot(
         reportsQuery,
         (snap) => {
-          const list = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as Omit<UserReport, 'id'>) }))
+          const list: UserReport[] = snap.docs
+            .map((d) => {
+              const raw = d.data() as Partial<UserReport>;
+              return {
+                id: d.id,
+                classId: '6A' as const,
+                reporterId: typeof raw.reporterId === 'string' ? raw.reporterId : '',
+                reporterName: typeof raw.reporterName === 'string' ? raw.reporterName : 'Siswa',
+                targetUid: typeof raw.targetUid === 'string' ? raw.targetUid : '',
+                targetName: typeof raw.targetName === 'string' ? raw.targetName : 'Anggota',
+                roomId: typeof raw.roomId === 'string' ? raw.roomId : '',
+                messageId: typeof raw.messageId === 'string' ? raw.messageId : '',
+                messageExcerpt: typeof raw.messageExcerpt === 'string' ? raw.messageExcerpt : '',
+                category: raw.category || 'lainnya',
+                reason: typeof raw.reason === 'string' ? raw.reason : '',
+                status: raw.status || 'menunggu',
+                resolutionNote: typeof raw.resolutionNote === 'string' ? raw.resolutionNote : '',
+                resolvedBy: typeof raw.resolvedBy === 'string' ? raw.resolvedBy : '',
+                createdAt: raw.createdAt ?? null,
+                updatedAt: raw.updatedAt ?? null,
+              };
+            })
             .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
           setUserReports(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'user_reports')
+        (error) => handleListenerError(error, OperationType.LIST, 'user_reports', true)
       )
     );
 
@@ -610,8 +809,9 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'users_public'), where('classId', '==', CLASS_ID)),
         (snap) => {
+          clearTransientNotice();
           const list = snap.docs
-            .map((d) => normalizeUserPublic(d.data() as Partial<UserPublic> & { uid: string }))
+            .map((d) => normalizeUserPublic(d.data() as Partial<UserPublic>, d.id))
             .sort((a, b) => a.absenNumber - b.absenNumber);
           setMembers(list);
           const selfUpdated = list.find((m) => m.uid === uid);
@@ -630,22 +830,31 @@ export default function App() {
             );
           }
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'users_public')
+        (error) => handleListenerError(error, OperationType.LIST, 'users_public')
       )
     );
 
     // 10. Notifications (Class-wide + Personal) + Read State
+    const normalizeNotif = (id: string, raw: Partial<NotificationItem>): NotificationItem => ({
+      id,
+      classId: '6A',
+      type: raw.type || 'info',
+      title: typeof raw.title === 'string' ? raw.title : 'Notifikasi Kelas',
+      body: typeof raw.body === 'string' ? raw.body : '',
+      targetTab: typeof raw.targetTab === 'string' ? raw.targetTab : 'beranda',
+      targetUid: typeof raw.targetUid === 'string' ? raw.targetUid : 'ALL',
+      actorId: typeof raw.actorId === 'string' ? raw.actorId : '',
+      actorName: typeof raw.actorName === 'string' ? raw.actorName : 'Kelas 6A',
+      createdAt: raw.createdAt ?? null,
+    });
+
     unsubs.push(
       onSnapshot(
         query(collection(db, 'notifications'), where('targetUid', '==', 'ALL')),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<NotificationItem, 'id'>),
-          }));
-          setClassNotifications(list);
+          setClassNotifications(snap.docs.map((d) => normalizeNotif(d.id, d.data() as Partial<NotificationItem>)));
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'notifications_all')
+        (error) => handleListenerError(error, OperationType.LIST, 'notifications_all', true)
       )
     );
 
@@ -653,13 +862,9 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'notifications'), where('targetUid', '==', uid)),
         (snap) => {
-          const list = snap.docs.map((d) => ({
-            id: d.id,
-            ...(d.data() as Omit<NotificationItem, 'id'>),
-          }));
-          setPrivateNotifications(list);
+          setPrivateNotifications(snap.docs.map((d) => normalizeNotif(d.id, d.data() as Partial<NotificationItem>)));
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'notifications_user')
+        (error) => handleListenerError(error, OperationType.LIST, 'notifications_user', true)
       )
     );
 
@@ -673,7 +878,7 @@ export default function App() {
           }
         },
         (error) =>
-          handleFirestoreError(error, OperationType.GET, `users_private/${uid}/notification_state/main`)
+          handleListenerError(error, OperationType.GET, `users_private/${uid}/notification_state/main`, true)
       )
     );
 
@@ -687,12 +892,25 @@ export default function App() {
       onSnapshot(
         activityQuery,
         (snap) => {
-          const list = snap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as Omit<ActivityLog, 'id'>) }))
+          const list: ActivityLog[] = snap.docs
+            .map((d) => {
+              const raw = d.data() as Partial<ActivityLog>;
+              return {
+                id: d.id,
+                classId: '6A' as const,
+                actorId: typeof raw.actorId === 'string' ? raw.actorId : '',
+                actorName: typeof raw.actorName === 'string' ? raw.actorName : 'Anggota',
+                actorRole: raw.actorRole || 'siswa',
+                action: typeof raw.action === 'string' ? raw.action : 'Aktivitas',
+                targetCollection: typeof raw.targetCollection === 'string' ? raw.targetCollection : '',
+                detail: typeof raw.detail === 'string' ? raw.detail : '',
+                createdAt: raw.createdAt ?? null,
+              };
+            })
             .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
           setActivityLogs(list);
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'activity_logs')
+        (error) => handleListenerError(error, OperationType.LIST, 'activity_logs', true)
       )
     );
 
@@ -702,13 +920,21 @@ export default function App() {
         onSnapshot(
           query(collection(db, 'login_history'), orderBy('loggedInAt', 'desc'), limit(120)),
           (snap) => {
-            const list = snap.docs.map((d) => ({
-              id: d.id,
-              ...(d.data() as Omit<LoginHistoryEntry, 'id'>),
-            }));
+            const list: LoginHistoryEntry[] = snap.docs.map((d) => {
+              const raw = d.data() as Partial<LoginHistoryEntry>;
+              return {
+                id: d.id,
+                uid: typeof raw.uid === 'string' ? raw.uid : '',
+                displayName: typeof raw.displayName === 'string' ? raw.displayName : 'Anggota 6A',
+                email: typeof raw.email === 'string' ? raw.email : '',
+                role: raw.role || 'siswa',
+                deviceInfo: typeof raw.deviceInfo === 'string' ? raw.deviceInfo : 'Browser',
+                loggedInAt: raw.loggedInAt ?? null,
+              };
+            });
             setLoginHistory(list);
           },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'login_history')
+          (error) => handleListenerError(error, OperationType.LIST, 'login_history', true)
         )
       );
     } else {
@@ -718,7 +944,7 @@ export default function App() {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [authReady, firebaseUser, profile?.uid, profile?.role, profile?.status]);
+  }, [authReady, firebaseUser, profile?.uid, profile?.role, profile?.status, subscriptionRetryTick]);
 
   const combinedNotifications = useMemo(() => {
     const map = new Map<string, NotificationItem>();
@@ -758,15 +984,7 @@ export default function App() {
       const newest = newlyArrived[0];
       if (newest.actorId !== firebaseUser.uid) {
         setLiveToast(newest);
-        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-          try {
-            new Notification(`${newest.title} · ${CLASS_TITLE}`, {
-              body: newest.body,
-            });
-          } catch {
-            // Ignore restricted webview notification error
-          }
-        }
+        safeShowBrowserNotification(`${newest.title} · ${CLASS_TITLE}`, newest.body);
       }
       knownNotifIdsRef.current = new Set(combinedNotifications.map((n) => n.id));
     }
@@ -787,14 +1005,18 @@ export default function App() {
     if (!firebaseUser) return;
     setIsProfileBusy(true);
     try {
-      const created = await createOrUpdateUserProfile(
-        firebaseUser,
-        displayName,
-        nickname,
-        absenNumber,
-        true
+      const created = await withRetry(
+        () =>
+          createOrUpdateUserProfile(
+            firebaseUser,
+            displayName,
+            nickname,
+            absenNumber,
+            true
+          ),
+        { maxAttempts: 2, baseDelayMs: 450 }
       );
-      sessionStorage.setItem(`logged_login_${firebaseUser.uid}`, '1');
+      safeSessionStorageSet(`logged_login_${firebaseUser.uid}`, '1');
       setProfile(created);
       setPendingOnboardingUser(null);
     } finally {
@@ -805,7 +1027,7 @@ export default function App() {
   const handleLogout = async () => {
     if (firebaseUser) {
       await updateUserPresence(firebaseUser.uid, false, Boolean(profile?.hideOnlineStatus));
-      sessionStorage.removeItem(`logged_login_${firebaseUser.uid}`);
+      safeSessionStorageRemove(`logged_login_${firebaseUser.uid}`);
     }
     await signOut(auth);
   };
@@ -826,8 +1048,7 @@ export default function App() {
   };
 
   const handleEnableBrowserPush = async () => {
-    if (typeof Notification === 'undefined') return;
-    const res = await Notification.requestPermission();
+    const res = await safeRequestNotificationPermission();
     setBrowserPushEnabled(res === 'granted');
   };
 
@@ -891,7 +1112,7 @@ export default function App() {
   const handleToggleCompactMode = () => {
     setCompactMode((prev) => {
       const next = !prev;
-      localStorage.setItem('kelas6a_compact', next ? '1' : '0');
+      safeLocalStorageSet('kelas6a_compact', next ? '1' : '0');
       return next;
     });
   };
@@ -926,6 +1147,10 @@ export default function App() {
           preferredStudentRef.current = pref;
         }}
         authError={authError}
+        hasSignedInUserWithoutProfile={Boolean(firebaseUser && !profile)}
+        onRetryConnection={
+          firebaseUser ? () => hydrateAuthenticatedUser(firebaseUser) : undefined
+        }
         isBusy={isProfileBusy}
       />
     );
@@ -1026,6 +1251,42 @@ export default function App() {
         </header>
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-24 lg:pb-10 max-w-6xl w-full mx-auto">
+          {(!isOnline || syncNotice) && (
+            <div
+              role="status"
+              className="mb-4 p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-100 text-xs flex flex-wrap items-center justify-between gap-3"
+            >
+              <div className="flex items-start gap-2.5 min-w-0">
+                {!isOnline ? (
+                  <WifiOff className="w-4 h-4 text-amber-700 dark:text-amber-300 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-amber-700 dark:text-amber-300 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-0.5 min-w-0">
+                  <p className="font-semibold">
+                    {!isOnline ? 'Koneksi Internet Terputus' : syncNotice?.title}
+                  </p>
+                  <p className="text-amber-800/90 dark:text-amber-200/90">
+                    {!isOnline
+                      ? 'Perangkat sedang offline. Data kelas akan tersinkron otomatis saat sinyal kembali.'
+                      : syncNotice?.message}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSyncNotice(null);
+                  setSubscriptionRetryTick((t) => t + 1);
+                }}
+                className="min-h-[34px] px-3 py-1.5 rounded-xl bg-white dark:bg-[#0F2419] hover:bg-amber-100/70 border border-amber-300 dark:border-amber-700 text-[#0B2416] dark:text-emerald-100 font-semibold inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Hubungkan Ulang</span>
+              </button>
+            </div>
+          )}
+
           {activeTab === 'beranda' && (
             <DashboardView
               profile={profile}

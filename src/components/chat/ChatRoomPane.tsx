@@ -22,6 +22,7 @@ import {
   Mic,
   Pin,
   PinOff,
+  RefreshCw,
   Reply,
   Search,
   Send,
@@ -31,7 +32,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { db, handleFirestoreError, OperationType } from '../../firebase';
+import { buildFirestoreErrorInfo, db, OperationType } from '../../firebase';
 import {
   blockClassmate,
   deleteChatMessage,
@@ -67,6 +68,7 @@ import {
 } from '../../utils/c6aBot';
 import { CHAT_MEDIA_LIMITS, validateMediaFile } from '../../utils/mediaUtils';
 import { checkSpamCooldown, REPORT_CATEGORIES } from '../../utils/moderation';
+import { classifyApplicationError, fetchWithTimeoutAndRetry } from '../../utils/resilience';
 import {
   formatRelativeLastSeen,
   formatTimeOnly,
@@ -138,6 +140,8 @@ export function ChatRoomPane({
   const [searchQuery, setSearchQuery] = useState('');
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [roomListenerError, setRoomListenerError] = useState<string | null>(null);
+  const [roomRetryTick, setRoomRetryTick] = useState(0);
 
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [voiceMode, setVoiceMode] = useState(false);
@@ -214,6 +218,7 @@ export function ChatRoomPane({
 
   // Real-time messages listener
   useEffect(() => {
+    setRoomListenerError(null);
     const q = query(
       collection(db, 'chat_rooms', room.roomId, 'messages'),
       orderBy('createdAt', 'asc'),
@@ -222,6 +227,7 @@ export function ChatRoomPane({
     const unsub = onSnapshot(
       q,
       (snap) => {
+        setRoomListenerError(null);
         const list = snap.docs.map((d) => {
           const raw = d.data() as Partial<RoomChatMessage>;
           return {
@@ -250,11 +256,16 @@ export function ChatRoomPane({
         setRoomMessages(list);
       },
       (error) => {
-        console.error('Room messages listener error:', error);
+        console.error(
+          'Room messages listener error:',
+          buildFirestoreErrorInfo(error, OperationType.LIST, `chat_rooms/${room.roomId}/messages`)
+        );
+        const friendly = classifyApplicationError(error);
+        setRoomListenerError(`${friendly.title}: ${friendly.message}`);
       }
     );
     return () => unsub();
-  }, [room.roomId]);
+  }, [room.roomId, roomRetryTick]);
 
   // Typing indicator listener
   useEffect(() => {
@@ -350,11 +361,17 @@ export function ChatRoomPane({
     const extracted = extractChatBotQuery(submittedText, profile.role);
     if (!extracted.isBotTrigger) return;
 
-    const nowLabel = new Intl.DateTimeFormat('id-ID', {
-      timeZone: 'Asia/Jakarta',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date());
+    let nowLabel = '--.--';
+    try {
+      nowLabel = new Intl.DateTimeFormat('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date());
+    } catch {
+      const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
+      nowLabel = `${String(wib.getUTCHours()).padStart(2, '0')}.${String(wib.getUTCMinutes()).padStart(2, '0')}`;
+    }
 
     if (extracted.mode === 'bot') {
       const botRes = runC6ABotCommand(extracted.queryText, botContext, profile.role);
@@ -381,18 +398,26 @@ export function ChatRoomPane({
         userLabel: getUserDisplayLabel(profile),
         userRole: profile.role,
       };
-      let res = await fetch('/api/c6a/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...requestBody, stream: true }),
-      });
-      if (res.status === 504 || res.status === 503 || res.status === 502) {
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        res = await fetch('/api/c6a/chat', {
+      let res = await fetchWithTimeoutAndRetry(
+        '/api/c6a/chat',
+        {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...requestBody, stream: false, fastMode: true }),
-        });
+          body: JSON.stringify({ ...requestBody, stream: true }),
+        },
+        { timeoutMs: 14000, maxRetries: 1, retryDelayMs: 450 }
+      );
+      if (res.status === 504 || res.status === 503 || res.status === 502) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        res = await fetchWithTimeoutAndRetry(
+          '/api/c6a/chat',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...requestBody, stream: false, fastMode: true }),
+          },
+          { timeoutMs: 14000, maxRetries: 1, retryDelayMs: 500 }
+        );
       }
 
       const contentType = res.headers.get('content-type') || '';
@@ -875,6 +900,21 @@ export function ChatRoomPane({
               <PinOff className="w-3.5 h-3.5" />
             </button>
           )}
+        </div>
+      )}
+
+      {/* Room Listener Error Banner */}
+      {roomListenerError && (
+        <div className="px-4 py-2.5 bg-amber-50 dark:bg-amber-950/50 border-b border-amber-200 dark:border-amber-800 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900 dark:text-amber-200">
+          <span>{roomListenerError}</span>
+          <button
+            type="button"
+            onClick={() => setRoomRetryTick((t) => t + 1)}
+            className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>Sambung Ulang</span>
+          </button>
         </div>
       )}
 

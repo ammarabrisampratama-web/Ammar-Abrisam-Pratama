@@ -6,13 +6,18 @@ import {
   deleteDoc,
   doc,
   getDoc,
-  getDocFromServer,
   serverTimestamp,
   setDoc,
   updateDoc,
   writeBatch,
 } from 'firebase/firestore';
-import { BOOTSTRAPPED_OWNER_EMAIL, db, handleFirestoreError, OperationType } from '../firebase';
+import {
+  BOOTSTRAPPED_OWNER_EMAIL,
+  db,
+  handleFirestoreError,
+  OperationType,
+  verifyFirestoreServerHealth,
+} from '../firebase';
 import type {
   AccountStatus,
   AdminMessageCategory,
@@ -186,16 +191,22 @@ export async function syncPrivateUserOnLogin(firebaseUser: User): Promise<void> 
   }
 }
 
-export function normalizeUserPublic(raw: Partial<UserPublic> & { uid: string }): UserPublic {
+export function normalizeUserPublic(
+  raw: Partial<UserPublic> & { uid?: string },
+  fallbackUid: string = ''
+): UserPublic {
   const displayName = raw.displayName?.trim() || 'Anggota 6A';
+  const role: UserRole =
+    raw.role === 'owner' || raw.role === 'admin' || raw.role === 'siswa' ? raw.role : 'siswa';
+  const status: AccountStatus = raw.status === 'nonaktif' ? 'nonaktif' : 'aktif';
   return {
-    uid: raw.uid,
+    uid: raw.uid || fallbackUid,
     displayName,
     nickname: raw.nickname?.trim() || displayName.split(' ')[0] || displayName,
-    photoURL: raw.photoURL || '',
-    absenNumber: typeof raw.absenNumber === 'number' ? raw.absenNumber : 1,
-    role: raw.role || 'siswa',
-    status: raw.status || 'aktif',
+    photoURL: typeof raw.photoURL === 'string' ? raw.photoURL : '',
+    absenNumber: typeof raw.absenNumber === 'number' && Number.isFinite(raw.absenNumber) ? raw.absenNumber : 1,
+    role,
+    status,
     classId: '6A',
     lastLoginAt: raw.lastLoginAt ?? null,
     updatedAt: raw.updatedAt ?? null,
@@ -210,7 +221,7 @@ export async function fetchPublicProfile(uid: string): Promise<UserPublic | null
   try {
     const snap = await getDoc(doc(db, 'users_public', uid));
     if (!snap.exists()) return null;
-    return normalizeUserPublic(snap.data() as Partial<UserPublic> & { uid: string });
+    return normalizeUserPublic(snap.data() as Partial<UserPublic>, uid);
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
   }
@@ -249,7 +260,7 @@ export async function createOrUpdateUserProfile(
     };
 
     if (existingSnap.exists()) {
-      const existingData = normalizeUserPublic(existingSnap.data() as Partial<UserPublic> & { uid: string });
+      const existingData = normalizeUserPublic(existingSnap.data() as Partial<UserPublic>, firebaseUser.uid);
       const resolvedPhoto = (extras?.photoURL !== undefined ? extras.photoURL : existingData.photoURL || fallbackPhoto).slice(0, 1000);
       const updatePayload: Record<string, unknown> = {
         displayName: trimmedName,
@@ -1686,27 +1697,5 @@ export async function checkFirebaseConnectionLatency(): Promise<{
   latencyMs: number;
   message: string;
 }> {
-  const start = performance.now();
-  try {
-    await getDocFromServer(doc(db, 'settings', 'class_config'));
-    return {
-      ok: true,
-      latencyMs: Math.round(performance.now() - start),
-      message: 'Terhubung langsung ke server Cloud Firestore.',
-    };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes('permission-denied')) {
-      return {
-        ok: true,
-        latencyMs: Math.round(performance.now() - start),
-        message: 'Server Cloud Firestore merespons aktif (akses terproteksi Rules).',
-      };
-    }
-    return {
-      ok: false,
-      latencyMs: Math.round(performance.now() - start),
-      message: msg,
-    };
-  }
+  return verifyFirestoreServerHealth();
 }
